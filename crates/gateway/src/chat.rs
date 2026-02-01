@@ -870,6 +870,9 @@ async fn run_with_tools(
     user_message_index: usize,
     skills: &[moltis_skills::types::SkillMetadata],
 ) -> Option<(String, u32, u32)> {
+    // Load identity and user profile from config so the LLM knows who it is.
+    let config = moltis_config::discover_and_load();
+
     let native_tools = provider.supports_tools();
     let system_prompt = build_system_prompt_with_session(
         tool_registry,
@@ -877,6 +880,8 @@ async fn run_with_tools(
         project_context,
         session_context,
         skills,
+        Some(&config.identity),
+        Some(&config.user),
     );
 
     // Broadcast tool events to the UI as they happen.
