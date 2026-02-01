@@ -67,7 +67,7 @@ request-independent data here (no cookies, no sessions — those still need
 // server.rs
 #[derive(serde::Serialize)]
 struct GonData {
-    identity: GonIdentity,
+    identity: moltis_config::ResolvedIdentity,
     // add new fields here
 }
 ```
@@ -95,6 +95,31 @@ All of those are fragile. The gon blob is the single injection point.
 When data changes at runtime, call `gon.refresh()` instead of manually
 updating individual fields — it keeps everything consistent.
 
+## Authentication Architecture
+
+The gateway supports password and passkey (WebAuthn) authentication, managed
+in `crates/gateway/src/auth.rs` with routes in `auth_routes.rs` and middleware
+in `auth_middleware.rs`.
+
+Key concepts:
+
+- **Setup code**: On first run (no password set), a random code is printed to
+  the terminal. The user enters it on the `/setup` page to set a password or
+  register a passkey. The code is single-use and cleared after setup.
+- **Auth states**: `auth_disabled` (explicit `[auth] disabled = true` in
+  config) and localhost-no-password (safe default) are distinct states.
+  `auth_disabled` is a deliberate user choice; localhost-no-password is the
+  initial state before setup.
+- **Session cookies**: HTTP-only `moltis_session` cookie, validated by the
+  auth middleware.
+- **API keys**: Bearer token auth via `Authorization: Bearer <key>` header,
+  managed through the settings UI.
+- **Credential store**: `CredentialStore` in `auth.rs` persists passwords
+  (argon2 hashed), passkeys, API keys, and session tokens to a JSON file.
+
+The auth middleware (`RequireAuth`) protects all `/api/*` routes except
+`/api/auth/*` and `/api/gon`.
+
 ## Testing
 
 ```bash
@@ -116,6 +141,14 @@ biome check --write      # Lint & format JavaScript files (installed via mise)
 
 When editing `Cargo.toml` or other TOML files, run `taplo fmt` to format them
 according to the project's `taplo.toml` configuration.
+
+## CLI Auth Commands
+
+The `auth` subcommand (`crates/cli/src/auth_commands.rs`) provides:
+
+- `moltis auth reset-password` — clear the stored password
+- `moltis auth reset-identity` — clear identity and user profile (triggers
+  onboarding on next load)
 
 ## Provider Implementation Guidelines
 
