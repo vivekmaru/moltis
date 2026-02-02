@@ -13,7 +13,7 @@ use {
         routing::get,
     },
     tower_http::cors::{Any, CorsLayer},
-    tracing::info,
+    tracing::{debug, info},
 };
 
 #[cfg(feature = "web-ui")]
@@ -410,20 +410,93 @@ pub async fn start_gateway(
             cpu_quota: config.tools.exec.sandbox.resource_limits.cpu_quota,
             pids_max: config.tools.exec.sandbox.resource_limits.pids_max,
         },
-        packages: config
-            .tools
-            .exec
-            .sandbox
-            .packages
-            .clone()
-            .unwrap_or_else(|| {
-                moltis_tools::sandbox::DEFAULT_SANDBOX_PACKAGES
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect()
-            }),
+        packages: config.tools.exec.sandbox.packages.clone(),
     };
     let sandbox_router = Arc::new(moltis_tools::sandbox::SandboxRouter::new(sandbox_config));
+
+    // Spawn background image pre-build. This bakes configured packages into a
+    // container image so container creation is instant. Backends that don't
+    // support image building return Ok(None) and the spawn is harmless.
+    {
+        let router = Arc::clone(&sandbox_router);
+        let backend = Arc::clone(router.backend());
+        let packages = router.config().packages.clone();
+        let base_image = router
+            .config()
+            .image
+            .clone()
+            .unwrap_or_else(|| moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string());
+
+        if !packages.is_empty() {
+            let deferred_for_build = Arc::clone(&deferred_state);
+            tokio::spawn(async move {
+                // Broadcast build start event.
+                if let Some(state) = deferred_for_build.get() {
+                    crate::broadcast::broadcast(
+                        state,
+                        "sandbox.image.build",
+                        serde_json::json!({ "phase": "start", "packages": packages }),
+                        crate::broadcast::BroadcastOpts {
+                            drop_if_slow: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+
+                match backend.build_image(&base_image, &packages).await {
+                    Ok(Some(result)) => {
+                        info!(
+                            tag = %result.tag,
+                            built = result.built,
+                            "sandbox image pre-build complete"
+                        );
+                        router.set_global_image(Some(result.tag.clone())).await;
+
+                        if let Some(state) = deferred_for_build.get() {
+                            crate::broadcast::broadcast(
+                                state,
+                                "sandbox.image.build",
+                                serde_json::json!({
+                                    "phase": "done",
+                                    "tag": result.tag,
+                                    "built": result.built,
+                                }),
+                                crate::broadcast::BroadcastOpts {
+                                    drop_if_slow: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        }
+                    },
+                    Ok(None) => {
+                        debug!(
+                            "sandbox image pre-build: no-op (no packages or unsupported backend)"
+                        );
+                    },
+                    Err(e) => {
+                        tracing::warn!("sandbox image pre-build failed: {e}");
+                        if let Some(state) = deferred_for_build.get() {
+                            crate::broadcast::broadcast(
+                                state,
+                                "sandbox.image.build",
+                                serde_json::json!({
+                                    "phase": "error",
+                                    "error": e.to_string(),
+                                }),
+                                crate::broadcast::BroadcastOpts {
+                                    drop_if_slow: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        }
+                    },
+                }
+            });
+        }
+    }
 
     // Load any persisted sandbox overrides from session metadata.
     {
@@ -752,6 +825,63 @@ pub async fn start_gateway(
             broadcast_tick(&tick_state).await;
         }
     });
+
+    // Spawn sandbox event broadcast task: forwards provision events to WS clients.
+    {
+        let event_state = Arc::clone(&state);
+        let mut event_rx = sandbox_router.subscribe_events();
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(event) => {
+                        let (event_name, payload) = match event {
+                            moltis_tools::sandbox::SandboxEvent::Provisioning {
+                                container,
+                                packages,
+                            } => (
+                                "sandbox.image.provision",
+                                serde_json::json!({
+                                    "phase": "start",
+                                    "container": container,
+                                    "packages": packages,
+                                }),
+                            ),
+                            moltis_tools::sandbox::SandboxEvent::Provisioned { container } => (
+                                "sandbox.image.provision",
+                                serde_json::json!({
+                                    "phase": "done",
+                                    "container": container,
+                                }),
+                            ),
+                            moltis_tools::sandbox::SandboxEvent::ProvisionFailed {
+                                container,
+                                error,
+                            } => (
+                                "sandbox.image.provision",
+                                serde_json::json!({
+                                    "phase": "error",
+                                    "container": container,
+                                    "error": error,
+                                }),
+                            ),
+                        };
+                        crate::broadcast::broadcast(
+                            &event_state,
+                            event_name,
+                            payload,
+                            crate::broadcast::BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
 
     // Spawn log broadcast task: forwards captured tracing events to WS clients.
     if let Some(buf) = log_buffer {

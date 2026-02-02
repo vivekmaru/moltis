@@ -303,10 +303,68 @@ pub struct SandboxConfig {
     /// "auto" prefers Apple Container on macOS when available, falls back to Docker.
     pub backend: String,
     pub resource_limits: ResourceLimitsConfig,
-    /// Packages to install via `apt-get` after container creation.
-    /// Defaults to `["curl", "python3", "nodejs", "npm"]`.
+    /// Packages to install via `apt-get` in the sandbox image.
     /// Set to an empty list to skip provisioning.
-    pub packages: Option<Vec<String>>,
+    #[serde(default = "default_sandbox_packages")]
+    pub packages: Vec<String>,
+}
+
+/// Default packages installed in sandbox containers.
+/// Inspired by GitHub Actions runner images — covers commonly needed
+/// CLI tools, language runtimes, and utilities for LLM-driven tasks.
+fn default_sandbox_packages() -> Vec<String> {
+    [
+        // Networking & HTTP
+        "curl",
+        "wget",
+        "ca-certificates",
+        "dnsutils",
+        "netcat-openbsd",
+        "openssh-client",
+        // Language runtimes
+        "python3",
+        "python3-dev",
+        "python3-pip",
+        "python3-venv",
+        "python-is-python3",
+        "nodejs",
+        "npm",
+        "ruby",
+        "ruby-dev",
+        // Build toolchain & native deps
+        "build-essential",
+        "clang",
+        "libclang-dev",
+        "llvm-dev",
+        "pkg-config",
+        "libssl-dev",
+        "libsqlite3-dev",
+        "libyaml-dev",
+        "liblzma-dev",
+        "autoconf",
+        "automake",
+        "libtool",
+        // Common CLI utilities (mirrors GitHub runner "vital" + "command" sets)
+        "git",
+        "jq",
+        "zip",
+        "unzip",
+        "bzip2",
+        "xz-utils",
+        "p7zip-full",
+        "tar",
+        "rsync",
+        "file",
+        "tree",
+        "sqlite3",
+        "sudo",
+        "locales",
+        // Text processing & search
+        "ripgrep",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 impl Default for SandboxConfig {
@@ -320,7 +378,7 @@ impl Default for SandboxConfig {
             no_network: true,
             backend: "auto".into(),
             resource_limits: ResourceLimitsConfig::default(),
-            packages: None, // None = use default packages from sandbox module
+            packages: default_sandbox_packages(),
         }
     }
 }

@@ -288,30 +288,23 @@ impl AgentTool for ExecTool {
         // Resolve sandbox: dynamic per-session router takes priority over static sandbox.
         let result = if let Some(ref router) = self.sandbox_router {
             let sk = session_key.unwrap_or("main");
-            if router.is_sandboxed(sk).await {
+            if is_sandboxed {
                 let id = router.sandbox_id_for(sk);
                 let image = router.resolve_image(sk, None).await;
                 let backend = router.backend();
                 info!(session = sk, sandbox_id = %id, backend = backend.backend_name(), image, "sandbox ensure_ready");
                 backend.ensure_ready(&id, Some(&image)).await?;
-                info!(session = sk, sandbox_id = %id, command, "sandbox running command");
+                debug!(session = sk, sandbox_id = %id, command, "sandbox running command");
                 backend.exec(&id, command, &opts).await?
             } else {
-                info!(
-                    session = sk,
-                    command, "running unsandboxed (sandbox disabled for session)"
-                );
+                debug!(session = sk, command, "running unsandboxed");
                 exec_command(command, &opts).await?
             }
         } else if let Some(ref id) = self.sandbox_id {
-            info!(sandbox_id = %id, command, "static sandbox running command");
+            debug!(sandbox_id = %id, command, "static sandbox running command");
             self.sandbox.ensure_ready(id, None).await?;
             self.sandbox.exec(id, command, &opts).await?
         } else {
-            info!(
-                command,
-                "running without sandbox (no router, no static sandbox)"
-            );
             exec_command(command, &opts).await?
         };
 

@@ -10,6 +10,36 @@ use {
 
 use crate::exec::{ExecOpts, ExecResult};
 
+/// Install configured packages inside a container via `apt-get`.
+///
+/// `cli` is the container CLI binary name (e.g. `"docker"` or `"container"`).
+async fn provision_packages(cli: &str, container_name: &str, packages: &[String]) -> Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let pkg_list = packages.join(" ");
+    info!(container = container_name, packages = %pkg_list, "provisioning sandbox packages");
+    let output = tokio::process::Command::new(cli)
+        .args([
+            "exec",
+            container_name,
+            "sh",
+            "-c",
+            &format!("apt-get update -qq && apt-get install -y -qq {pkg_list} 2>&1 | tail -5"),
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            container = container_name,
+            %stderr,
+            "package provisioning failed (non-fatal)"
+        );
+    }
+    Ok(())
+}
+
 /// Default container image used when none is configured.
 pub const DEFAULT_SANDBOX_IMAGE: &str = "ubuntu:25.10";
 
@@ -77,32 +107,6 @@ pub struct SandboxConfig {
     pub packages: Vec<String>,
 }
 
-/// Default packages installed in new sandbox containers.
-/// Inspired by GitHub Actions runner images — covers the most commonly needed
-/// CLI tools, language runtimes, and utilities for LLM-driven tasks.
-pub const DEFAULT_SANDBOX_PACKAGES: &[&str] = &[
-    // Networking & HTTP
-    "curl",
-    "wget",
-    "ca-certificates",
-    // Language runtimes
-    "python3",
-    "python3-pip",
-    "nodejs",
-    "npm",
-    // Common CLI utilities
-    "git",
-    "jq",
-    "zip",
-    "unzip",
-    "rsync",
-    "openssh-client",
-    // Build essentials (needed by many npm/pip packages)
-    "build-essential",
-    // Text processing
-    "ripgrep",
-];
-
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
@@ -114,10 +118,7 @@ impl Default for SandboxConfig {
             no_network: false,
             backend: "auto".into(),
             resource_limits: ResourceLimits::default(),
-            packages: DEFAULT_SANDBOX_PACKAGES
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            packages: Vec::new(),
         }
     }
 }
@@ -135,6 +136,15 @@ impl std::fmt::Display for SandboxId {
     }
 }
 
+/// Result of a `build_image` call.
+#[derive(Debug, Clone)]
+pub struct BuildImageResult {
+    /// The full image tag (e.g. `moltis-sandbox:abc123`).
+    pub tag: String,
+    /// Whether the build was actually performed (false = image already existed).
+    pub built: bool,
+}
+
 /// Trait for sandbox implementations (Docker, cgroups, Apple Container, etc.).
 #[async_trait]
 pub trait Sandbox: Send + Sync {
@@ -150,6 +160,203 @@ pub trait Sandbox: Send + Sync {
 
     /// Clean up sandbox resources.
     async fn cleanup(&self, id: &SandboxId) -> Result<()>;
+
+    /// Pre-build a container image with packages baked in.
+    /// Returns `None` for backends that don't support image building.
+    async fn build_image(
+        &self,
+        _base: &str,
+        _packages: &[String],
+    ) -> Result<Option<BuildImageResult>> {
+        Ok(None)
+    }
+}
+
+/// Compute the content-hash tag for a pre-built sandbox image.
+/// Pure function — independent of any specific container CLI.
+pub fn sandbox_image_tag(base: &str, packages: &[String]) -> String {
+    use std::hash::Hasher;
+    let mut h = std::hash::DefaultHasher::new();
+    h.write(base.as_bytes());
+    let mut sorted: Vec<&String> = packages.iter().collect();
+    sorted.sort();
+    for p in &sorted {
+        h.write(p.as_bytes());
+    }
+    format!("moltis-sandbox:{:016x}", h.finish())
+}
+
+/// Check whether a container image exists locally.
+/// `cli` is the container CLI binary (e.g. `"docker"` or `"container"`).
+async fn sandbox_image_exists(cli: &str, tag: &str) -> bool {
+    tokio::process::Command::new(cli)
+        .args(["image", "inspect", tag])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+/// Information about a locally cached sandbox image.
+#[derive(Debug, Clone)]
+pub struct SandboxImage {
+    pub tag: String,
+    pub size: String,
+    pub created: String,
+}
+
+/// List all local `moltis-sandbox:*` images across available container CLIs.
+pub async fn list_sandbox_images() -> Result<Vec<SandboxImage>> {
+    let mut images = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Docker: supports --format with Go templates.
+    if is_cli_available("docker") {
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "image",
+                "ls",
+                "--format",
+                "{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}",
+            ])
+            .output()
+            .await?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                if parts.len() == 3
+                    && parts[0].starts_with("moltis-sandbox:")
+                    && seen.insert(parts[0].to_string())
+                {
+                    images.push(SandboxImage {
+                        tag: parts[0].to_string(),
+                        size: parts[1].to_string(),
+                        created: parts[2].to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Apple Container: fixed table output (NAME  TAG  DIGEST), no --format.
+    // Parse the table, then use `image inspect` JSON for metadata.
+    if is_cli_available("container") {
+        let output = tokio::process::Command::new("container")
+            .args(["image", "ls"])
+            .output()
+            .await?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1) {
+                // Columns are whitespace-separated: NAME TAG DIGEST
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() >= 2 && cols[0] == "moltis-sandbox" {
+                    let tag = format!("{}:{}", cols[0], cols[1]);
+                    if !seen.insert(tag.clone()) {
+                        continue;
+                    }
+                    // Fetch size and created from inspect JSON.
+                    let (size, created) = inspect_apple_container_image(&tag).await;
+                    images.push(SandboxImage { tag, size, created });
+                }
+            }
+        }
+    }
+
+    Ok(images)
+}
+
+/// Extract size and created timestamp from Apple Container `image inspect` JSON.
+async fn inspect_apple_container_image(tag: &str) -> (String, String) {
+    let output = tokio::process::Command::new("container")
+        .args(["image", "inspect", tag])
+        .output()
+        .await;
+    let fallback = ("—".to_string(), "—".to_string());
+    let Ok(output) = output else {
+        return fallback;
+    };
+    if !output.status.success() {
+        return fallback;
+    }
+    let Ok(json): std::result::Result<serde_json::Value, _> =
+        serde_json::from_slice(&output.stdout)
+    else {
+        return fallback;
+    };
+    let entry = json.as_array().and_then(|a| a.first());
+    let Some(entry) = entry else {
+        return fallback;
+    };
+    let created = entry
+        .pointer("/index/annotations/org.opencontainers.image.created")
+        .and_then(|v| v.as_str())
+        .unwrap_or("—")
+        .to_string();
+    let size = entry
+        .pointer("/variants/0/size")
+        .and_then(|v| v.as_u64())
+        .map(format_bytes)
+        .unwrap_or_else(|| "—".to_string());
+    (size, created)
+}
+
+/// Format a byte count as a human-readable string (e.g. "361 MB").
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Remove a specific `moltis-sandbox:*` image.
+pub async fn remove_sandbox_image(tag: &str) -> Result<()> {
+    anyhow::ensure!(
+        tag.starts_with("moltis-sandbox:"),
+        "refusing to remove non-sandbox image: {tag}"
+    );
+    for cli in &["docker", "container"] {
+        if !is_cli_available(cli) {
+            continue;
+        }
+        if sandbox_image_exists(cli, tag).await {
+            // Apple Container uses `image delete`, Docker uses `image rm`.
+            let subcmd = if *cli == "container" {
+                "delete"
+            } else {
+                "rm"
+            };
+            let output = tokio::process::Command::new(cli)
+                .args(["image", subcmd, tag])
+                .output()
+                .await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("{cli} image {subcmd} failed for {tag}: {}", stderr.trim());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove all local `moltis-sandbox:*` images.
+pub async fn clean_sandbox_images() -> Result<usize> {
+    let images = list_sandbox_images().await?;
+    let count = images.len();
+    for img in &images {
+        remove_sandbox_image(&img.tag).await?;
+    }
+    Ok(count)
 }
 
 /// Docker-based sandbox implementation.
@@ -193,34 +400,6 @@ impl DockerSandbox {
             args.extend(["--pids-limit".to_string(), pids.to_string()]);
         }
         args
-    }
-
-    /// Install configured packages inside the container via `apt-get`.
-    async fn provision_packages(&self, container_name: &str) -> Result<()> {
-        if self.config.packages.is_empty() {
-            return Ok(());
-        }
-        let pkg_list = self.config.packages.join(" ");
-        info!(container = container_name, packages = %pkg_list, "provisioning sandbox packages");
-        let output = tokio::process::Command::new("docker")
-            .args([
-                "exec",
-                container_name,
-                "sh",
-                "-c",
-                &format!("apt-get update -qq && apt-get install -y -qq {pkg_list} 2>&1 | tail -5"),
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                container = container_name,
-                %stderr,
-                "package provisioning failed (non-fatal)"
-            );
-        }
-        Ok(())
     }
 
     fn workspace_args(&self) -> Vec<String> {
@@ -288,10 +467,70 @@ impl Sandbox for DockerSandbox {
             anyhow::bail!("docker run failed: {}", stderr.trim());
         }
 
-        // Install packages in the freshly created container.
-        self.provision_packages(&name).await?;
+        // Skip provisioning if the image is a pre-built moltis-sandbox image
+        // (packages are already baked in).
+        let is_prebuilt = image.starts_with("moltis-sandbox:");
+        if !is_prebuilt {
+            provision_packages("docker", &name, &self.config.packages).await?;
+        }
 
         Ok(())
+    }
+
+    async fn build_image(
+        &self,
+        base: &str,
+        packages: &[String],
+    ) -> Result<Option<BuildImageResult>> {
+        if packages.is_empty() {
+            return Ok(None);
+        }
+
+        let tag = sandbox_image_tag(base, packages);
+
+        // Check if image already exists.
+        if sandbox_image_exists("docker", &tag).await {
+            info!(
+                tag,
+                "pre-built sandbox image already exists, skipping build"
+            );
+            return Ok(Some(BuildImageResult { tag, built: false }));
+        }
+
+        // Generate Dockerfile in a temp dir.
+        let tmp_dir =
+            std::env::temp_dir().join(format!("moltis-sandbox-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir)?;
+
+        let pkg_list = packages.join(" ");
+        let dockerfile = format!(
+            "FROM {base}\nRUN apt-get update -qq && apt-get install -y -qq {pkg_list} && rm -rf /var/lib/apt/lists/*\n"
+        );
+        let dockerfile_path = tmp_dir.join("Dockerfile");
+        std::fs::write(&dockerfile_path, &dockerfile)?;
+
+        info!(tag, packages = %pkg_list, "building pre-built sandbox image");
+
+        let output = tokio::process::Command::new("docker")
+            .args(["build", "-t", &tag, "-f"])
+            .arg(&dockerfile_path)
+            .arg(&tmp_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await;
+
+        // Clean up temp dir regardless of result.
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let output = output?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("docker build failed for {tag}: {}", stderr.trim());
+        }
+
+        info!(tag, "pre-built sandbox image ready");
+        Ok(Some(BuildImageResult { tag, built: true }))
     }
 
     async fn exec(&self, id: &SandboxId, command: &str, opts: &ExecOpts) -> Result<ExecResult> {
@@ -531,34 +770,6 @@ impl AppleContainerSandbox {
         format!("{}-{}", self.container_prefix(), id.key)
     }
 
-    /// Install configured packages inside the container via `apt-get`.
-    async fn provision_packages(&self, container_name: &str) -> Result<()> {
-        if self.config.packages.is_empty() {
-            return Ok(());
-        }
-        let pkg_list = self.config.packages.join(" ");
-        info!(container = container_name, packages = %pkg_list, "provisioning sandbox packages");
-        let output = tokio::process::Command::new("container")
-            .args([
-                "exec",
-                container_name,
-                "sh",
-                "-c",
-                &format!("apt-get update -qq && apt-get install -y -qq {pkg_list} 2>&1 | tail -5"),
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                container = container_name,
-                %stderr,
-                "package provisioning failed (non-fatal)"
-            );
-        }
-        Ok(())
-    }
-
     /// Check whether the `container` CLI is available.
     pub async fn is_available() -> bool {
         tokio::process::Command::new("container")
@@ -660,8 +871,12 @@ impl Sandbox for AppleContainerSandbox {
 
         info!(name, image, "apple container created and running");
 
-        // Install packages in the freshly created container.
-        self.provision_packages(&name).await?;
+        // Skip provisioning if the image is a pre-built moltis-sandbox image
+        // (packages are already baked in).
+        let is_prebuilt = image.starts_with("moltis-sandbox:");
+        if !is_prebuilt {
+            provision_packages("container", &name, &self.config.packages).await?;
+        }
 
         Ok(())
     }
@@ -735,6 +950,59 @@ impl Sandbox for AppleContainerSandbox {
                 )
             },
         }
+    }
+
+    async fn build_image(
+        &self,
+        base: &str,
+        packages: &[String],
+    ) -> Result<Option<BuildImageResult>> {
+        if packages.is_empty() {
+            return Ok(None);
+        }
+
+        let tag = sandbox_image_tag(base, packages);
+
+        if sandbox_image_exists("container", &tag).await {
+            info!(
+                tag,
+                "pre-built sandbox image already exists, skipping build"
+            );
+            return Ok(Some(BuildImageResult { tag, built: false }));
+        }
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("moltis-sandbox-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir)?;
+
+        let pkg_list = packages.join(" ");
+        let dockerfile = format!(
+            "FROM {base}\nRUN apt-get update -qq && apt-get install -y -qq {pkg_list} && rm -rf /var/lib/apt/lists/*\n"
+        );
+        let dockerfile_path = tmp_dir.join("Dockerfile");
+        std::fs::write(&dockerfile_path, &dockerfile)?;
+
+        info!(tag, packages = %pkg_list, "building pre-built sandbox image (apple container)");
+
+        let output = tokio::process::Command::new("container")
+            .args(["build", "-t", &tag, "-f"])
+            .arg(&dockerfile_path)
+            .arg(&tmp_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await;
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let output = output?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("container build failed for {tag}: {}", stderr.trim());
+        }
+
+        info!(tag, "pre-built sandbox image ready (apple container)");
+        Ok(Some(BuildImageResult { tag, built: true }))
     }
 
     async fn cleanup(&self, id: &SandboxId) -> Result<()> {
@@ -811,6 +1079,20 @@ fn is_cli_available(name: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Events emitted by the sandbox subsystem for UI feedback.
+#[derive(Debug, Clone)]
+pub enum SandboxEvent {
+    /// Package provisioning started (Apple Container per-container install).
+    Provisioning {
+        container: String,
+        packages: Vec<String>,
+    },
+    /// Package provisioning finished.
+    Provisioned { container: String },
+    /// Package provisioning failed (non-fatal).
+    ProvisionFailed { container: String, error: String },
+}
+
 /// Routes sandbox decisions per-session, with per-session overrides on top of global config.
 pub struct SandboxRouter {
     config: SandboxConfig,
@@ -821,6 +1103,8 @@ pub struct SandboxRouter {
     image_overrides: RwLock<HashMap<String, String>>,
     /// Runtime override for the global default image (set via API, persisted externally).
     global_image_override: RwLock<Option<String>>,
+    /// Event channel for sandbox events (provision start/done/error).
+    event_tx: tokio::sync::broadcast::Sender<SandboxEvent>,
 }
 
 impl SandboxRouter {
@@ -828,24 +1112,38 @@ impl SandboxRouter {
         // Always create a real sandbox backend, even when global mode is Off,
         // because per-session overrides can enable sandboxing dynamically.
         let backend = create_sandbox_backend(config.clone());
+        let (event_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             config,
             backend,
             overrides: RwLock::new(HashMap::new()),
             image_overrides: RwLock::new(HashMap::new()),
             global_image_override: RwLock::new(None),
+            event_tx,
         }
     }
 
     /// Create a router with a custom sandbox backend (useful for testing).
     pub fn with_backend(config: SandboxConfig, backend: Arc<dyn Sandbox>) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             config,
             backend,
             overrides: RwLock::new(HashMap::new()),
             image_overrides: RwLock::new(HashMap::new()),
             global_image_override: RwLock::new(None),
+            event_tx,
         }
+    }
+
+    /// Subscribe to sandbox events (provision start/done/error).
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<SandboxEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Emit a sandbox event. Silently drops if no subscribers.
+    pub fn emit_event(&self, event: SandboxEvent) {
+        let _ = self.event_tx.send(event);
     }
 
     /// Check whether a session should run sandboxed.
@@ -1292,6 +1590,108 @@ mod tests {
             .await;
         router.remove_image_override("sess1").await;
         let img = router.resolve_image("sess1", None).await;
+        assert_eq!(img, DEFAULT_SANDBOX_IMAGE);
+    }
+
+    #[test]
+    fn test_docker_image_tag_deterministic() {
+        let packages = vec!["curl".into(), "git".into(), "wget".into()];
+        let tag1 = sandbox_image_tag("ubuntu:25.10", &packages);
+        let tag2 = sandbox_image_tag("ubuntu:25.10", &packages);
+        assert_eq!(tag1, tag2);
+        assert!(tag1.starts_with("moltis-sandbox:"));
+    }
+
+    #[test]
+    fn test_docker_image_tag_order_independent() {
+        let p1 = vec!["curl".into(), "git".into()];
+        let p2 = vec!["git".into(), "curl".into()];
+        assert_eq!(
+            sandbox_image_tag("ubuntu:25.10", &p1),
+            sandbox_image_tag("ubuntu:25.10", &p2),
+        );
+    }
+
+    #[test]
+    fn test_docker_image_tag_changes_with_base() {
+        let packages = vec!["curl".into()];
+        let t1 = sandbox_image_tag("ubuntu:25.10", &packages);
+        let t2 = sandbox_image_tag("ubuntu:24.04", &packages);
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn test_docker_image_tag_changes_with_packages() {
+        let p1 = vec!["curl".into()];
+        let p2 = vec!["curl".into(), "git".into()];
+        let t1 = sandbox_image_tag("ubuntu:25.10", &p1);
+        let t2 = sandbox_image_tag("ubuntu:25.10", &p2);
+        assert_ne!(t1, t2);
+    }
+
+    #[tokio::test]
+    async fn test_no_sandbox_build_image_is_noop() {
+        let sandbox = NoSandbox;
+        let result = sandbox
+            .build_image("ubuntu:25.10", &["curl".into()])
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_router_events() {
+        let config = SandboxConfig::default();
+        let router = SandboxRouter::new(config);
+        let mut rx = router.subscribe_events();
+
+        router.emit_event(SandboxEvent::Provisioning {
+            container: "test".into(),
+            packages: vec!["curl".into()],
+        });
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            SandboxEvent::Provisioning {
+                container,
+                packages,
+            } => {
+                assert_eq!(container, "test");
+                assert_eq!(packages, vec!["curl".to_string()]);
+            },
+            _ => panic!("unexpected event variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_router_global_image_override() {
+        let config = SandboxConfig::default();
+        let router = SandboxRouter::new(config);
+
+        // Default
+        let img = router.default_image().await;
+        assert_eq!(img, DEFAULT_SANDBOX_IMAGE);
+
+        // Set global override
+        router
+            .set_global_image(Some("moltis-sandbox:abc123".into()))
+            .await;
+        let img = router.default_image().await;
+        assert_eq!(img, "moltis-sandbox:abc123");
+
+        // Global override flows through resolve_image
+        let img = router.resolve_image("main", None).await;
+        assert_eq!(img, "moltis-sandbox:abc123");
+
+        // Session override still wins
+        router.set_image_override("main", "custom:v1".into()).await;
+        let img = router.resolve_image("main", None).await;
+        assert_eq!(img, "custom:v1");
+
+        // Clear and revert
+        router.set_global_image(None).await;
+        router.remove_image_override("main").await;
+        let img = router.default_image().await;
         assert_eq!(img, DEFAULT_SANDBOX_IMAGE);
     }
 
