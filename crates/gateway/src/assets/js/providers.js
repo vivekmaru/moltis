@@ -456,7 +456,13 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 			if (!b.available && b.id === "MLX") {
 				var installHint = document.createElement("div");
 				installHint.className = "install-hint";
-				installHint.innerHTML = "Install with: <code>pip install mlx-lm</code>";
+				// Use detected install commands from server, fallback to pip
+				var cmds = b.installCommands || ["pip install mlx-lm"];
+				if (cmds.length === 1) {
+					installHint.innerHTML = `Install with: <code>${cmds[0]}</code>`;
+				} else {
+					installHint.innerHTML = `Install with any of:<br>${cmds.map((c) => `<code>${c}</code>`).join(" or ")}`;
+				}
 				card.appendChild(installHint);
 			}
 

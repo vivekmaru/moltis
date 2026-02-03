@@ -32,6 +32,76 @@ fn is_mlx_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Detect available package managers for installing mlx-lm.
+/// Returns a list of (name, install_command) pairs, ordered by preference.
+fn detect_mlx_installers() -> Vec<(&'static str, &'static str)> {
+    let mut installers = Vec::new();
+
+    // Check for brew on macOS (preferred for mlx-lm)
+    if cfg!(target_os = "macos")
+        && std::process::Command::new("brew")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        installers.push(("brew", "brew install mlx-lm"));
+    }
+
+    // Check for uv (modern, fast Python package manager)
+    if std::process::Command::new("uv")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        installers.push(("uv", "uv pip install mlx-lm"));
+    }
+
+    // Check for pip3
+    if std::process::Command::new("pip3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        installers.push(("pip3", "pip3 install mlx-lm"));
+    }
+
+    // Check for pip
+    if std::process::Command::new("pip")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        installers.push(("pip", "pip install mlx-lm"));
+    }
+
+    // Fallback to python3 -m pip if nothing else found
+    if installers.is_empty()
+        && std::process::Command::new("python3")
+            .args(["-m", "pip", "--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        installers.push(("python3 -m pip", "python3 -m pip install mlx-lm"));
+    }
+
+    installers
+}
+
 /// Configuration file for local-llm stored in the config directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalLlmConfig {
@@ -145,6 +215,11 @@ impl LocalLlmService for LiveLocalLlmService {
         // Check MLX availability (requires mlx-lm Python package)
         let mlx_available = sys.is_apple_silicon && is_mlx_installed();
 
+        // Detect available package managers for install instructions
+        let installers = detect_mlx_installers();
+        let install_commands: Vec<&str> = installers.iter().map(|(_, cmd)| *cmd).collect();
+        let primary_install = install_commands.first().copied().unwrap_or("pip install mlx-lm");
+
         // Determine the recommended backend
         let recommended_backend = if mlx_available {
             "MLX"
@@ -167,15 +242,18 @@ impl LocalLlmService for LiveLocalLlmService {
         })];
 
         if sys.is_apple_silicon {
+            let mlx_description = if mlx_available {
+                "Optimized for Apple Silicon, fastest on Mac".to_string()
+            } else {
+                format!("Requires: {}", primary_install)
+            };
+
             available_backends.push(serde_json::json!({
                 "id": "MLX",
                 "name": "MLX (Apple Native)",
-                "description": if mlx_available {
-                    "Optimized for Apple Silicon, fastest on Mac"
-                } else {
-                    "Requires: pip install mlx-lm"
-                },
+                "description": mlx_description,
                 "available": mlx_available,
+                "installCommands": if mlx_available { None } else { Some(&install_commands) },
             }));
         }
 
