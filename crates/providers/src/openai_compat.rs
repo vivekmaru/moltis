@@ -596,6 +596,7 @@ pub struct StreamingToolState {
 }
 
 /// Result of processing a single SSE line.
+#[derive(Debug)]
 pub enum SseLineResult {
     /// No actionable event (empty line, non-data prefix)
     Skip,
@@ -868,6 +869,134 @@ pub fn finalize_stream(state: &mut StreamingToolState) -> Vec<StreamEvent> {
     }));
 
     events
+}
+
+// ============================================================================
+// OpenAI Responses API SSE streaming
+// ============================================================================
+
+/// State for tracking tool calls during Responses API SSE streaming.
+#[derive(Default)]
+pub struct ResponsesStreamState {
+    /// Next tool call index to assign.
+    pub current_tool_index: usize,
+    /// Map from output index -> (call_id, name).
+    pub tool_calls: HashMap<usize, (String, String)>,
+    /// Indices already completed (to avoid duplicate completion events).
+    pub completed_tool_calls: std::collections::HashSet<usize>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Resolve the output index from a Responses API SSE event.
+///
+/// Tries `output_index`, then `item_index` / `index`, falling back to `fallback`.
+fn responses_output_index(event: &serde_json::Value, fallback: usize) -> usize {
+    event
+        .get("output_index")
+        .or_else(|| event.get("item_index"))
+        .or_else(|| event.get("index"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|i| i as usize)
+        .unwrap_or(fallback)
+}
+
+/// Process a single SSE data line from a Responses API stream.
+///
+/// Handles the event types emitted by the OpenAI Responses API (`/responses`):
+/// - `response.output_text.delta` → `StreamEvent::Delta`
+/// - `response.output_item.added` (function_call) → `StreamEvent::ToolCallStart`
+/// - `response.function_call_arguments.delta` → `StreamEvent::ToolCallArgumentsDelta`
+/// - `response.function_call_arguments.done` → `StreamEvent::ToolCallComplete`
+/// - `response.completed` → extract usage → `SseLineResult::Done`
+/// - `error` / `response.failed` → `StreamEvent::Error`
+pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) -> SseLineResult {
+    if data == "[DONE]" {
+        return SseLineResult::Done;
+    }
+
+    let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) else {
+        return SseLineResult::Skip;
+    };
+
+    let evt_type = evt["type"].as_str().unwrap_or("");
+
+    match evt_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = evt["delta"].as_str()
+                && !delta.is_empty()
+            {
+                return SseLineResult::Events(vec![StreamEvent::Delta(delta.to_string())]);
+            }
+            SseLineResult::Skip
+        },
+        "response.output_item.added" => {
+            if evt["item"]["type"].as_str() == Some("function_call") {
+                let id = evt["item"]["call_id"].as_str().unwrap_or("").to_string();
+                let name = evt["item"]["name"].as_str().unwrap_or("").to_string();
+                let index = responses_output_index(&evt, state.current_tool_index);
+                state.current_tool_index = state.current_tool_index.max(index + 1);
+                state.tool_calls.insert(index, (id.clone(), name.clone()));
+                return SseLineResult::Events(vec![StreamEvent::ToolCallStart { id, name, index }]);
+            }
+            SseLineResult::Skip
+        },
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = evt["delta"].as_str()
+                && !delta.is_empty()
+            {
+                let index =
+                    responses_output_index(&evt, state.current_tool_index.saturating_sub(1));
+                return SseLineResult::Events(vec![StreamEvent::ToolCallArgumentsDelta {
+                    index,
+                    delta: delta.to_string(),
+                }]);
+            }
+            SseLineResult::Skip
+        },
+        "response.function_call_arguments.done" => {
+            let index = responses_output_index(&evt, state.current_tool_index.saturating_sub(1));
+            if state.completed_tool_calls.insert(index) {
+                return SseLineResult::Events(vec![StreamEvent::ToolCallComplete { index }]);
+            }
+            SseLineResult::Skip
+        },
+        "response.completed" => {
+            let mut events = Vec::new();
+
+            // Extract usage.
+            if let Some(usage) = evt.get("response").and_then(|r| r.get("usage")) {
+                let parsed = parse_openai_compat_usage(usage);
+                state.input_tokens = parsed.input_tokens;
+                state.output_tokens = parsed.output_tokens;
+            }
+
+            // Complete any remaining tool calls.
+            let mut pending: Vec<usize> = state.tool_calls.keys().copied().collect();
+            pending.sort_unstable();
+            for index in pending {
+                if state.completed_tool_calls.insert(index) {
+                    events.push(StreamEvent::ToolCallComplete { index });
+                }
+            }
+
+            events.push(StreamEvent::Done(Usage {
+                input_tokens: state.input_tokens,
+                output_tokens: state.output_tokens,
+                ..Default::default()
+            }));
+            SseLineResult::Events(events)
+        },
+        "error" | "response.failed" => {
+            let msg = evt["error"]["message"]
+                .as_str()
+                .or_else(|| evt["response"]["error"]["message"].as_str())
+                .or_else(|| evt["message"].as_str())
+                .unwrap_or("unknown error");
+            SseLineResult::Events(vec![StreamEvent::Error(msg.to_string())])
+        },
+        _ => SseLineResult::Skip,
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2043,5 +2172,177 @@ mod tests {
             },
             _ => panic!("Expected Events"),
         }
+    }
+
+    // ============================================================
+    // Tests for process_responses_sse_line (Responses API SSE)
+    // ============================================================
+
+    #[test]
+    fn responses_sse_done_marker() {
+        let mut state = ResponsesStreamState::default();
+        assert!(matches!(
+            process_responses_sse_line("[DONE]", &mut state),
+            SseLineResult::Done
+        ));
+    }
+
+    #[test]
+    fn responses_sse_text_delta() {
+        let mut state = ResponsesStreamState::default();
+        let data = r#"{"type":"response.output_text.delta","delta":"hello"}"#;
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(&events[0], StreamEvent::Delta(d) if d == "hello"));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_empty_delta_skips() {
+        let mut state = ResponsesStreamState::default();
+        let data = r#"{"type":"response.output_text.delta","delta":""}"#;
+        assert!(matches!(
+            process_responses_sse_line(data, &mut state),
+            SseLineResult::Skip
+        ));
+    }
+
+    #[test]
+    fn responses_sse_tool_call_lifecycle() {
+        let mut state = ResponsesStreamState::default();
+
+        // 1. Tool call added
+        let added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"exec"}}"#;
+        match process_responses_sse_line(added, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    &events[0],
+                    StreamEvent::ToolCallStart { id, name, index }
+                    if id == "call_1" && name == "exec" && *index == 0
+                ));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+        assert_eq!(state.current_tool_index, 1);
+
+        // 2. Arguments delta
+        let args_delta = r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"cmd\":"}"#;
+        match process_responses_sse_line(args_delta, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    &events[0],
+                    StreamEvent::ToolCallArgumentsDelta { index, delta }
+                    if *index == 0 && delta == "{\"cmd\":"
+                ));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+
+        // 3. Arguments done
+        let args_done = r#"{"type":"response.function_call_arguments.done","output_index":0}"#;
+        match process_responses_sse_line(args_done, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    &events[0],
+                    StreamEvent::ToolCallComplete { index } if *index == 0
+                ));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_completed_extracts_usage() {
+        let mut state = ResponsesStreamState::default();
+        let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":42,"output_tokens":7}}}"#;
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                // Should emit Done with usage
+                let done = events.iter().find(|e| matches!(e, StreamEvent::Done(_)));
+                assert!(done.is_some(), "expected Done event");
+                if let Some(StreamEvent::Done(usage)) = done {
+                    assert_eq!(usage.input_tokens, 42);
+                    assert_eq!(usage.output_tokens, 7);
+                }
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_completed_finishes_pending_tool_calls() {
+        let mut state = ResponsesStreamState::default();
+        // Add a tool call without completing it
+        state.tool_calls.insert(0, ("call_1".into(), "exec".into()));
+        state.current_tool_index = 1;
+
+        let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                let has_complete = events
+                    .iter()
+                    .any(|e| matches!(e, StreamEvent::ToolCallComplete { index } if *index == 0));
+                assert!(has_complete, "expected ToolCallComplete for index 0");
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_error_event() {
+        let mut state = ResponsesStreamState::default();
+        let data = r#"{"type":"error","error":{"message":"rate limited"}}"#;
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    &events[0],
+                    StreamEvent::Error(msg) if msg == "rate limited"
+                ));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_failed_event() {
+        let mut state = ResponsesStreamState::default();
+        let data =
+            r#"{"type":"response.failed","response":{"error":{"message":"model overloaded"}}}"#;
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    &events[0],
+                    StreamEvent::Error(msg) if msg == "model overloaded"
+                ));
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_unknown_event_skips() {
+        let mut state = ResponsesStreamState::default();
+        let data = r#"{"type":"response.in_progress"}"#;
+        assert!(matches!(
+            process_responses_sse_line(data, &mut state),
+            SseLineResult::Skip
+        ));
+    }
+
+    #[test]
+    fn responses_sse_invalid_json_skips() {
+        let mut state = ResponsesStreamState::default();
+        assert!(matches!(
+            process_responses_sse_line("not json", &mut state),
+            SseLineResult::Skip
+        ));
     }
 }

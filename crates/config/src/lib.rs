@@ -34,7 +34,7 @@ pub use {
         ChatConfig, GeoLocation, MemoryScope, MessageQueueMode, MoltisConfig, PresetMemoryConfig,
         PresetToolPolicy, ResolvedIdentity, SessionAccessPolicyConfig, Timezone, ToolMode,
         UserProfile, VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig, VoiceSttConfig,
-        VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig,
+        VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig, WireApi,
     },
     validate::{Diagnostic, Severity, ValidationResult},
 };
