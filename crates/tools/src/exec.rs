@@ -359,49 +359,63 @@ impl AgentTool for ExecTool {
         // to that node. Otherwise fall through to local/sandbox execution.
         // Filter empty/whitespace-only strings — some models pass `""` when they
         // don't know what value to use, which should be treated as "not specified".
-        let node_ref = params
+        let model_node = params
             .get("node")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
-            .map(String::from)
-            .or_else(|| self.default_node.clone());
-        // Only attempt node routing when nodes are actually connected.  If no
-        // nodes are available the param is silently ignored and execution falls
-        // through to the local/sandbox path, avoiding confusing errors when the
-        // model hallucinates a node value.
-        if let (Some(provider), Some(node_ref)) = (&self.node_provider, &node_ref) {
+            .map(String::from);
+        // Determine the effective node reference, distinguishing model-supplied
+        // values from the admin-configured default.  When no nodes are connected:
+        // - Model-hallucinated values are silently dropped (fall through to local).
+        // - A configured `default_node` produces a clear error so the admin knows
+        //   the intended remote host is unavailable.
+        let node_ref = if let Some(provider) = &self.node_provider {
             if provider.has_connected_nodes() {
-                let node_id = provider.resolve_node_id(node_ref).await.ok_or_else(|| {
-                    Error::message(format!("node '{node_ref}' not found or not connected"))
-                })?;
-
-                let cwd = params.get("working_dir").and_then(|v| v.as_str());
-
-                info!(
-                    command,
-                    node_id = %node_id,
-                    timeout_secs,
-                    "exec forwarding to remote node"
-                );
-
-                let result = provider
-                    .exec_on_node(&node_id, command, timeout_secs, cwd, None)
-                    .await
-                    .map_err(|e| Error::message(format!("node exec failed: {e}")))?;
-
-                if let Some(ref cb) = self.completion_callback {
-                    let preview_len = 200;
-                    cb(ExecCompletionEvent {
-                        command: command.to_string(),
-                        exit_code: result.exit_code,
-                        stdout_preview: result.stdout.chars().take(preview_len).collect(),
-                        stderr_preview: result.stderr.chars().take(preview_len).collect(),
-                    });
+                model_node.or_else(|| self.default_node.clone())
+            } else if let Some(ref dn) = self.default_node {
+                return Err(Error::message(format!(
+                    "default node '{dn}' is configured but no nodes are currently connected"
+                ))
+                .into());
+            } else {
+                if model_node.is_some() {
+                    debug!("ignoring model-supplied node parameter — no nodes are connected");
                 }
-
-                return Ok(serde_json::to_value(&result)?);
+                None
             }
-            debug!(node_ref, "ignoring node parameter — no nodes are connected");
+        } else {
+            None
+        };
+        if let (Some(provider), Some(node_ref)) = (&self.node_provider, &node_ref) {
+            let node_id = provider.resolve_node_id(node_ref).await.ok_or_else(|| {
+                Error::message(format!("node '{node_ref}' not found or not connected"))
+            })?;
+
+            let cwd = params.get("working_dir").and_then(|v| v.as_str());
+
+            info!(
+                command,
+                node_id = %node_id,
+                timeout_secs,
+                "exec forwarding to remote node"
+            );
+
+            let result = provider
+                .exec_on_node(&node_id, command, timeout_secs, cwd, None)
+                .await
+                .map_err(|e| Error::message(format!("node exec failed: {e}")))?;
+
+            if let Some(ref cb) = self.completion_callback {
+                let preview_len = 200;
+                cb(ExecCompletionEvent {
+                    command: command.to_string(),
+                    exit_code: result.exit_code,
+                    stdout_preview: result.stdout.chars().take(preview_len).collect(),
+                    stderr_preview: result.stderr.chars().take(preview_len).collect(),
+                });
+            }
+
+            return Ok(serde_json::to_value(&result)?);
         }
 
         // Check sandbox state early — we need it for working_dir resolution.
@@ -1589,6 +1603,35 @@ mod tests {
         assert!(
             !props.contains_key("node"),
             "node param should be hidden when no nodes are connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exec_errors_when_default_node_configured_but_disconnected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tool = ExecTool {
+            working_dir: Some(temp_dir.path().to_path_buf()),
+            ..Default::default()
+        }
+        .with_node_provider(
+            Arc::new(DisconnectedNodeProvider),
+            Some("production".into()),
+        );
+
+        // Admin configured a default node but it's not connected — must error,
+        // not silently fall through to local execution.
+        let err = tool
+            .execute(serde_json::json!({ "command": "echo should-fail" }))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("production"),
+            "error should mention the configured node name, got: {msg}"
+        );
+        assert!(
+            msg.contains("no nodes are currently connected"),
+            "error should explain no nodes are connected, got: {msg}"
         );
     }
 }
