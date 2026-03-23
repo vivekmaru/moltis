@@ -46,7 +46,7 @@ pub fn mime_from_extension(ext: &str) -> Option<&'static str> {
     match lower.as_str() {
         "text" | "log" => return Some("text/plain"),
         "ppm" => return Some("image/x-portable-pixmap"),
-        _ => {}
+        _ => {},
     }
     mime_guess::from_ext(&lower).first_raw()
 }
