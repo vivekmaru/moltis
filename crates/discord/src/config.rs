@@ -611,8 +611,8 @@ mod tests {
         );
 
         // Storage path still exposes the token
-        let storage = serde_json::to_value(&cfg)
-            .unwrap_or_else(|e| panic!("storage serialize failed: {e}"));
+        let storage =
+            serde_json::to_value(&cfg).unwrap_or_else(|e| panic!("storage serialize failed: {e}"));
         assert_eq!(storage["token"], "super-secret-bot-token");
     }
 
