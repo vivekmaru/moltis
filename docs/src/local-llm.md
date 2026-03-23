@@ -159,7 +159,10 @@ cargo build --release --features local-llm-vulkan
 Requirements:
 
 - Linux: install Vulkan development packages, for example on Debian/Ubuntu:
-  `sudo apt-get install libvulkan-dev glslc`
+  `sudo apt-get install libvulkan-dev glslang-tools`
+  (Ubuntu 24.04+ also has a `glslc` package; on 22.04 install it from the
+  [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home) if the build
+  requires the `glslc` binary)
 - Windows: install the LunarG Vulkan SDK and set the `VULKAN_SDK` environment
   variable before building
 
