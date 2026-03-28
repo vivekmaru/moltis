@@ -150,10 +150,10 @@ pub async fn import_repo_bundle_with_store(
     repo.quarantined = true;
     repo.quarantine_reason = Some(IMPORT_QUARANTINE_REASON.into());
     repo.provenance = Some(RepoProvenance {
-        original_source: repo.source.clone(),
-        original_commit_sha: repo.commit_sha.clone(),
+        original_source,
+        original_commit_sha,
         imported_from: Some(bundle_path.display().to_string()),
-        exported_at_ms: Some(current_time_ms()),
+        exported_at_ms: Some(exported_at_ms),
     });
     repo.skills = skill_states
         .into_iter()
@@ -163,12 +163,6 @@ pub async fn import_repo_bundle_with_store(
             ..skill
         })
         .collect();
-
-    if let Some(provenance) = repo.provenance.as_mut() {
-        provenance.original_source = original_source;
-        provenance.original_commit_sha = original_commit_sha;
-        provenance.exported_at_ms = Some(exported_at_ms);
-    }
 
     manifest.add_repo(repo);
     store.save(&manifest)?;

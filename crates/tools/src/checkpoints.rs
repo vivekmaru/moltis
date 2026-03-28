@@ -265,6 +265,7 @@ fn checkpoint_path_blocking(
 }
 
 fn restore_checkpoint_blocking(base_dir: &Path, id: &str) -> Result<CheckpointRecord> {
+    validate_checkpoint_id(id)?;
     let checkpoint_dir = base_dir.join(id);
     let record = read_manifest(&checkpoint_dir)?;
     let source = PathBuf::from(&record.source_path);
@@ -294,6 +295,17 @@ fn restore_checkpoint_blocking(base_dir: &Path, id: &str) -> Result<CheckpointRe
     }
 
     Ok(record)
+}
+
+fn validate_checkpoint_id(id: &str) -> Result<()> {
+    let is_valid = id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    if !is_valid {
+        return Err(Error::message(format!("invalid checkpoint id '{id}'")));
+    }
+    Ok(())
 }
 
 fn classify_source_kind(metadata: &fs::Metadata, source: &Path) -> Result<CheckpointSourceKind> {
@@ -475,5 +487,14 @@ mod tests {
         let filtered = manager.list(20, Some("beta")).await.unwrap();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].source_path.ends_with("beta.txt"));
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_non_checkpoint_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf());
+
+        let error = manager.restore("../../etc/passwd").await.unwrap_err();
+        assert!(error.to_string().contains("invalid checkpoint id"));
     }
 }

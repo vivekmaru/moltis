@@ -800,68 +800,64 @@ async fn inspect_imported_private_key(
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    let public_output = Command::new("ssh-keygen")
-        .arg("-y")
-        .arg("-f")
-        .arg(&key_path)
-        .output()
-        .await?;
+    let mut public_command = Command::new("ssh-keygen");
+    public_command.arg("-y");
+    if let Some(passphrase) = passphrase {
+        public_command.arg("-P").arg(passphrase);
+    }
+    let public_output = public_command.arg("-f").arg(&key_path).output().await?;
     if !public_output.status.success() {
         let stderr = String::from_utf8_lossy(&public_output.stderr)
             .trim()
             .to_string();
-        if stderr.to_lowercase().contains("passphrase") {
-            let Some(passphrase) = passphrase else {
-                anyhow::bail!(
-                    "this private key is passphrase-protected, provide the passphrase to import it"
-                );
-            };
-            let public_output = Command::new("ssh-keygen")
-                .arg("-y")
-                .arg("-P")
-                .arg(passphrase)
-                .arg("-f")
-                .arg(&key_path)
-                .output()
-                .await?;
-            if !public_output.status.success() {
-                anyhow::bail!(
-                    "{}",
-                    String::from_utf8_lossy(&public_output.stderr)
-                        .trim()
-                        .to_string()
-                );
-            }
-            let decrypt_output = Command::new("ssh-keygen")
-                .arg("-p")
-                .arg("-P")
-                .arg(passphrase)
-                .arg("-N")
-                .arg("")
-                .arg("-f")
-                .arg(&key_path)
-                .output()
-                .await?;
-            if !decrypt_output.status.success() {
-                anyhow::bail!(
-                    "{}",
-                    String::from_utf8_lossy(&decrypt_output.stderr)
-                        .trim()
-                        .to_string()
-                );
-            }
-            let fingerprint = ssh_keygen_fingerprint(&key_path).await?;
-            let decrypted_private_key = tokio::fs::read_to_string(&key_path).await?;
-            let public_key = String::from_utf8(public_output.stdout)?.trim().to_string();
-            return Ok((decrypted_private_key, public_key, fingerprint));
+        if passphrase.is_none() && looks_like_passphrase_error(&stderr) {
+            anyhow::bail!(
+                "this private key is passphrase-protected, provide the passphrase to import it"
+            );
         }
         anyhow::bail!(stderr);
+    }
+
+    if let Some(passphrase) = passphrase {
+        let decrypt_output = Command::new("ssh-keygen")
+            .arg("-p")
+            .arg("-P")
+            .arg(passphrase)
+            .arg("-N")
+            .arg("")
+            .arg("-f")
+            .arg(&key_path)
+            .output()
+            .await?;
+        if !decrypt_output.status.success() {
+            anyhow::bail!(
+                "{}",
+                String::from_utf8_lossy(&decrypt_output.stderr)
+                    .trim()
+                    .to_string()
+            );
+        }
     }
 
     let fingerprint = ssh_keygen_fingerprint(&key_path).await?;
     let decrypted_private_key = tokio::fs::read_to_string(&key_path).await?;
     let public_key = String::from_utf8(public_output.stdout)?.trim().to_string();
     Ok((decrypted_private_key, public_key, fingerprint))
+}
+
+fn looks_like_passphrase_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "passphrase",
+        "bad decrypt",
+        "wrong pass phrase",
+        "wrong passphrase",
+        "incorrect passphrase",
+        "incorrect pass phrase",
+        "error in libcrypto",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 async fn ssh_keygen_fingerprint(path: &std::path::Path) -> anyhow::Result<String> {
@@ -1269,6 +1265,17 @@ mod tests {
         let classified =
             classify_ssh_failure("Permission denied (publickey).").expect("should classify");
         assert_eq!(classified.0, "auth_failed");
+    }
+
+    #[test]
+    fn looks_like_passphrase_error_matches_common_ssh_keygen_messages() {
+        assert!(looks_like_passphrase_error(
+            "load key \"/tmp/key\": incorrect passphrase supplied to decrypt private key",
+        ));
+        assert!(looks_like_passphrase_error(
+            "Load key \"/tmp/key\": error in libcrypto",
+        ));
+        assert!(!looks_like_passphrase_error("invalid format"));
     }
 
     #[test]

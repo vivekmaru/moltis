@@ -801,6 +801,9 @@ impl CredentialStore {
                     let enc = vault.encrypt_string(private_key, &aad).await?;
                     (enc, 1_i64)
                 } else {
+                    // Managed SSH keys created while the vault is locked are
+                    // stored transiently in plaintext and upgraded by the
+                    // vault migration on the next successful unseal.
                     (private_key.to_owned(), 0_i64)
                 }
             } else {

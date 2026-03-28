@@ -507,7 +507,7 @@ fn shell_single_quote(value: &str) -> String {
 /// Filter environment variables to the safe allowlist.
 fn filter_env(env: &HashMap<String, String>) -> HashMap<String, String> {
     env.iter()
-        .filter(|(key, _)| is_safe_env(key))
+        .filter(|(key, _)| is_safe_env(key) && is_valid_env_key(key))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -533,6 +533,12 @@ fn is_safe_env(key: &str) -> bool {
     }
 
     false
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn parse_exec_result(value: &serde_json::Value) -> anyhow::Result<NodeExecResult> {
@@ -869,6 +875,7 @@ mod tests {
         env.insert("TERM".into(), "xterm-256color".into());
         env.insert("LANG".into(), "en_US.UTF-8".into());
         env.insert("LC_ALL".into(), "en_US.UTF-8".into());
+        env.insert("LC_$(id)".into(), "en_US.UTF-8".into());
         env.insert("DYLD_INSERT_LIBRARIES".into(), "/evil.dylib".into());
         env.insert("LD_PRELOAD".into(), "/evil.so".into());
         env.insert("NODE_OPTIONS".into(), "--inspect".into());
@@ -880,6 +887,7 @@ mod tests {
         assert!(filtered.contains_key("TERM"));
         assert!(filtered.contains_key("LANG"));
         assert!(filtered.contains_key("LC_ALL"));
+        assert!(!filtered.contains_key("LC_$(id)"));
         assert!(!filtered.contains_key("DYLD_INSERT_LIBRARIES"));
         assert!(!filtered.contains_key("LD_PRELOAD"));
         assert!(!filtered.contains_key("NODE_OPTIONS"));
@@ -932,11 +940,13 @@ mod tests {
     fn build_remote_shell_script_quotes_cwd_and_env() {
         let mut env = HashMap::new();
         env.insert("LANG".into(), "en_US.UTF-8".into());
+        env.insert("LC_$(id)".into(), "boom".into());
         env.insert("OPENAI_API_KEY".into(), "secret".into());
 
         let script = build_remote_shell_script("printf '%s' hi", Some("/tmp/it's"), Some(&env));
         assert!(script.contains("cd '/tmp/it'\"'\"'s'"));
         assert!(script.contains("export LANG='en_US.UTF-8'"));
+        assert!(!script.contains("LC_$(id)"));
         assert!(!script.contains("OPENAI_API_KEY"));
         assert!(script.ends_with("printf '%s' hi"));
     }
