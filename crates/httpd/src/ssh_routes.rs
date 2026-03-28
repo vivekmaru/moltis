@@ -805,7 +805,12 @@ async fn inspect_imported_private_key(
     if let Some(passphrase) = passphrase {
         public_command.arg("-P").arg(passphrase);
     }
-    let public_output = public_command.arg("-f").arg(&key_path).output().await?;
+    let public_output = public_command
+        .arg("-f")
+        .arg(&key_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await?;
     if !public_output.status.success() {
         let stderr = String::from_utf8_lossy(&public_output.stderr)
             .trim()
@@ -827,6 +832,7 @@ async fn inspect_imported_private_key(
             .arg("")
             .arg("-f")
             .arg(&key_path)
+            .stdin(std::process::Stdio::null())
             .output()
             .await?;
         if !decrypt_output.status.success() {

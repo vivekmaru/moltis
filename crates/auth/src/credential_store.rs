@@ -984,7 +984,7 @@ impl CredentialStore {
         let mut tx = self.pool.begin().await?;
         let has_default: Option<(i64,)> =
             sqlx::query_as("SELECT COUNT(1) FROM ssh_targets WHERE is_default = 1")
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?;
         let should_be_default = is_default || has_default.unwrap_or((0,)).0 == 0;
         if should_be_default {
