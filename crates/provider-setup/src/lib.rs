@@ -2368,6 +2368,62 @@ impl ProviderSetupService for LiveProviderSetupService {
             }
         }
 
+        // Custom OpenAI-compatible providers: discover models via /v1/models
+        // when no model is specified, instead of probing (which can timeout).
+        if is_custom && selected_model.is_none() {
+            let api_key_str = api_key.unwrap_or_default();
+            let base = base_url_value.unwrap_or_default();
+            match moltis_providers::openai::fetch_models_from_api(
+                Secret::new(api_key_str.to_string()),
+                base.to_string(),
+            )
+            .await
+            {
+                Ok(discovered) => {
+                    let model_list: Vec<Value> = discovered
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "id": format!("{provider_name}::{}", m.id),
+                                "displayName": &m.display_name,
+                                "provider": provider_name,
+                            })
+                        })
+                        .collect();
+                    self.emit_validation_progress(
+                        &validation_provider_name,
+                        request_id.as_deref(),
+                        "complete",
+                        progress_payload(serde_json::json!({
+                            "message": "Discovered models from endpoint.",
+                            "modelCount": model_list.len(),
+                        })),
+                    )
+                    .await;
+                    return Ok(serde_json::json!({
+                        "valid": true,
+                        "models": model_list,
+                    }));
+                },
+                Err(err) => {
+                    let error = format!("Failed to discover models from endpoint: {err}");
+                    self.emit_validation_progress(
+                        &validation_provider_name,
+                        request_id.as_deref(),
+                        "error",
+                        progress_payload(serde_json::json!({
+                            "message": error.clone(),
+                        })),
+                    )
+                    .await;
+                    return Ok(serde_json::json!({
+                        "valid": false,
+                        "error": error,
+                    }));
+                },
+            }
+        }
+
         let normalized_base_url = if provider_name == "ollama" {
             base_url_value.map(|url| normalize_ollama_openai_base_url(Some(url)))
         } else {
@@ -4700,6 +4756,104 @@ mod tests {
         assert_eq!(
             ids[2], "openrouter::gpt-4o-search-preview",
             "slow namespaced model should be last, got: {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_key_custom_provider_without_model_returns_discovered_models() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "data": [
+                        {"id": "gpt-4o", "object": "model", "created": 1700000000},
+                        {"id": "gpt-4o-mini", "object": "model", "created": 1700000001},
+                        {"id": "dall-e-3", "object": "model", "created": 1700000002}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let registry = Arc::new(RwLock::new(ProviderRegistry::from_env_with_config(
+            &ProvidersConfig::default(),
+        )));
+        let svc = LiveProviderSetupService::new(registry, ProvidersConfig::default(), None);
+        let result = svc
+            .validate_key(serde_json::json!({
+                "provider": "custom-test-server",
+                "apiKey": "sk-test",
+                "baseUrl": format!("http://{addr}")
+            }))
+            .await
+            .expect("validate_key should return payload");
+        server.abort();
+
+        assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+        let models = result
+            .get("models")
+            .and_then(|v| v.as_array())
+            .expect("models array should be present");
+        // Chat-capable models should be included (namespaced with provider).
+        assert!(
+            models.iter().any(|m| m.get("id").and_then(|v| v.as_str())
+                == Some("custom-test-server::gpt-4o"))
+        );
+        assert!(models.iter().any(
+            |m| m.get("id").and_then(|v| v.as_str()) == Some("custom-test-server::gpt-4o-mini")
+        ));
+        // Non-chat models (dall-e-3) are filtered by fetch_models_from_api.
+        assert!(
+            !models
+                .iter()
+                .any(|m| m.get("id").and_then(|v| v.as_str())
+                    == Some("custom-test-server::dall-e-3"))
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_key_custom_provider_discovery_error_returns_invalid() {
+        use axum::{Router, http::StatusCode, routing::get};
+
+        let app = Router::new().route(
+            "/models",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let registry = Arc::new(RwLock::new(ProviderRegistry::from_env_with_config(
+            &ProvidersConfig::default(),
+        )));
+        let svc = LiveProviderSetupService::new(registry, ProvidersConfig::default(), None);
+        let result = svc
+            .validate_key(serde_json::json!({
+                "provider": "custom-test-server",
+                "apiKey": "sk-test",
+                "baseUrl": format!("http://{addr}")
+            }))
+            .await
+            .expect("validate_key should return payload");
+        server.abort();
+
+        assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(false));
+        let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            error.contains("Failed to discover models"),
+            "unexpected error: {error}"
         );
     }
 }

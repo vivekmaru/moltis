@@ -337,7 +337,7 @@ fn models_endpoint(base_url: &str) -> String {
 ///
 /// The Responses API includes `output_index` on most events. Falls back to
 /// `item_index` / `index` for robustness, then to `fallback`.
-async fn fetch_models_from_api(
+pub async fn fetch_models_from_api(
     api_key: secrecy::Secret<String>,
     base_url: String,
 ) -> anyhow::Result<Vec<super::DiscoveredModel>> {
