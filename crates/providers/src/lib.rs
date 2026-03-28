@@ -1563,7 +1563,8 @@ impl ProviderRegistry {
             let Some(base_url) = entry.base_url.as_ref().filter(|u| !u.trim().is_empty()) else {
                 continue;
             };
-            if should_fetch_models(config, name) {
+            let has_explicit_models = !configured_models_for_provider(config, name).is_empty();
+            if !has_explicit_models && should_fetch_models(config, name) {
                 pending.push((
                     name.clone(),
                     openai::start_model_discovery(api_key.clone(), base_url.clone()),
@@ -4114,6 +4115,74 @@ mod tests {
             "anthropic::claude-opus-4-5-20251101@reasoning-high"
         );
         assert_eq!(variant_ids[4], "openai::gpt-4o");
+    }
+
+    #[test]
+    fn custom_provider_with_explicit_models_skips_discovery() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec!["my-model".into()],
+                fetch_models: true,
+                ..Default::default()
+            },
+        );
+        let pending = ProviderRegistry::fire_discoveries(&config, &HashMap::new());
+        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"custom-mylocal"),
+            "should not fire discovery for custom provider with explicit models, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn custom_provider_without_explicit_models_fires_discovery() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec![],
+                fetch_models: true,
+                ..Default::default()
+            },
+        );
+        let pending = ProviderRegistry::fire_discoveries(&config, &HashMap::new());
+        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"custom-mylocal"),
+            "should fire discovery for custom provider without explicit models, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn custom_provider_with_explicit_models_registers_without_discovery() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec!["my-model".into()],
+                ..Default::default()
+            },
+        );
+        let registry =
+            ProviderRegistry::from_env_with_config_and_overrides(&config, &HashMap::new());
+        let models = registry.list_models();
+        assert!(
+            models
+                .iter()
+                .any(|m| m.id == "custom-mylocal::my-model" && m.provider == "custom-mylocal"),
+            "explicit model should be registered even without discovery, got: {models:?}"
+        );
     }
 
     #[test]
