@@ -19,6 +19,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260328.02] - 2026-03-28
+### Added
+- [telegram] Isolate forum-topic sessions by thread_id
+
+
+### Changed
+- [telegram] Consolidate parse_chat_target, fix typing indicator
+
+
+### Fixed
+- [telegram] Propagate thread_id parse errors in parse_chat_target
+- [providers] Skip model discovery for custom providers with explicit models
+- [providers] Replace redundant test with one that pins the new guard
+- [provider-setup] Skip probe for custom providers without model
+- [provider-setup] Remove redundant is_chat_capable_model filter
+- [chat] Use system role for compaction summary
+- [chat] Use user role for compaction summary
+- [providers] Restore MiniMax top-level system prompt extraction
+- [telegram] Allow unwrap in topic tests to satisfy workspace clippy lints
+- [provider-setup] Use Arc<AtomicBool> instead of static in test
+
 ## [20260328.01] - 2026-03-28
 ### Added
 - [website] Add local dev server with SSR partial injection
