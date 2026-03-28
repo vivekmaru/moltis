@@ -19,6 +19,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260328.01] - 2026-03-28
+### Added
+- [website] Add local dev server with SSR partial injection
+- [web] Add changelog link to header nav
+- [providers] Add prompt caching for Anthropic and OpenRouter
+- [telegram] Extract plaintext and markdown documents from messages
+- [providers] Add Fireworks.ai as primary provider
+
+
+### Changed
+- [website] Shared nav via SSR partial, add Changelog link
+- [telegram] Use std::str::from_utf8 for UTF-8 truncation
+- [telegram] Normalize MIME type once, avoid redundant UTF-8 scans
+
+
+### Fixed
+- [website] Allow nav links without data-page to navigate normally
+- [website] Highlight Changelog tab and show GitHub stars on /changelog
+- [website] Share GitHub stars script via nav partial, fix Changelog click
+- [web] Point report issue link to template chooser
+- [providers] Align indentation in stream_with_tools debug macro
+- [telegram] Address PR review comments on document handling
+- [telegram] Enforce char limit on all document content paths
+- [telegram] Prevent U+FFFD from byte-boundary truncation of CJK text
+- [install] Remove spurious -1 revision from .deb filename in installer
+
 ## [20260327.05] - 2026-03-27
 ### Changed
 - [release] Build changelog HTML in prepare-release instead of CI
