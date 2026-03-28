@@ -81,7 +81,8 @@ function renderMarkdown(markdown) {
 				// Check if this is the Unreleased section
 				isUnreleased = text.includes("Unreleased");
 				const display = text.replace(/^\[([^\]]+)\]/, "$1");
-				html.push(`<div class="mt-8 first:mt-0 border-t border-gray-200 dark:border-gray-800 pt-4" id="${escapeHtml(slug)}">`);
+				html.push(`<div class="mt-8 first:mt-0 border-t border-gray-200 dark:border-gray-800" id="${escapeHtml(slug)}"></div>`);
+				html.push(`<div class="sticky top-14 z-10 bg-white/95 dark:bg-gray-950/95 backdrop-blur-sm py-2 -mx-4 px-4 sm:-mx-6 sm:px-6">`);
 				html.push(`<h2 class="font-mono text-lg font-bold text-gray-900 dark:text-white m-0"><a href="#${escapeHtml(slug)}" class="no-underline hover:text-orange-600 dark:hover:text-orange-400">${escapeHtml(display)}</a></h2>`);
 				html.push("</div>");
 			} else if (level === 3) {
