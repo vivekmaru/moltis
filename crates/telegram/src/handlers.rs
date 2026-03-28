@@ -1647,13 +1647,11 @@ fn extract_text_document_content(data: &[u8], media_type: &str) -> Option<String
     let mut truncated = false;
     let bounded = if data.len() > MAX_INLINE_DOCUMENT_BYTES {
         truncated = true;
-        // Find the last valid UTF-8 boundary before the limit to avoid
-        // slicing in the middle of a multi-byte sequence.
-        let mut end = MAX_INLINE_DOCUMENT_BYTES;
-        while end > 0 && (data[end] & 0xC0) == 0x80 {
-            end -= 1;
+        let slice = &data[..MAX_INLINE_DOCUMENT_BYTES];
+        match std::str::from_utf8(slice) {
+            Ok(_) => slice,
+            Err(e) => &slice[..e.valid_up_to()],
         }
-        &data[..end]
     } else {
         data
     };
