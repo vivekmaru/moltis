@@ -1247,16 +1247,19 @@ mod tests {
 
     #[test]
     fn classify_ssh_failure_recognizes_host_key_verification() {
-        let classified =
-            classify_ssh_failure("Host key verification failed.\r\n").expect("should classify");
-        assert_eq!(classified.0, "host_key_verification_failed");
+        assert_eq!(
+            classify_ssh_failure("Host key verification failed.\r\n")
+                .map(|classified| classified.0),
+            Some("host_key_verification_failed")
+        );
     }
 
     #[test]
     fn classify_ssh_failure_recognizes_permission_denied() {
-        let classified =
-            classify_ssh_failure("Permission denied (publickey).").expect("should classify");
-        assert_eq!(classified.0, "auth_failed");
+        assert_eq!(
+            classify_ssh_failure("Permission denied (publickey).").map(|classified| classified.0),
+            Some("auth_failed")
+        );
     }
 
     #[test]
