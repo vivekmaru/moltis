@@ -434,7 +434,7 @@ pub async fn ssh_test_target(
     )
     .await;
 
-    Ok(build_ssh_test_response(Some(target.label), &probe, result))
+    Ok(build_ssh_test_response(Some(target.label), probe, result))
 }
 
 pub async fn ssh_scan_host_key(
@@ -664,7 +664,7 @@ pub async fn ssh_doctor_test_active(
     )
     .await;
 
-    Ok(build_ssh_test_response(Some(route.label), &probe, result))
+    Ok(build_ssh_test_response(Some(route.label), probe, result))
 }
 
 async fn refresh_ssh_target_count(state: &crate::server::AppState) {
@@ -775,10 +775,7 @@ async fn generate_ssh_key_material(name: &str) -> anyhow::Result<(String, String
         .output()
         .await?;
     if !output.status.success() {
-        anyhow::bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        );
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
 
     let private_key: String = tokio::fs::read_to_string(&key_path).await?;
@@ -836,12 +833,7 @@ async fn inspect_imported_private_key(
             .output()
             .await?;
         if !decrypt_output.status.success() {
-            anyhow::bail!(
-                "{}",
-                String::from_utf8_lossy(&decrypt_output.stderr)
-                    .trim()
-                    .to_string()
-            );
+            anyhow::bail!("{}", String::from_utf8_lossy(&decrypt_output.stderr).trim());
         }
     }
 
@@ -873,10 +865,7 @@ async fn ssh_keygen_fingerprint(path: &std::path::Path) -> anyhow::Result<String
         .output()
         .await?;
     if !output.status.success() {
-        anyhow::bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        );
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
@@ -980,10 +969,7 @@ async fn scan_target_known_host(
     command.arg(&resolved.host);
     let output = command.output().await?;
     if !output.status.success() {
-        anyhow::bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        );
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     let known_host = String::from_utf8(output.stdout)?.trim().to_string();
     if known_host.is_empty() {
