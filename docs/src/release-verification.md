@@ -24,6 +24,8 @@ sha256sum --check moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 ```bash
 # Import the maintainer's public key (one-time)
+# Find the fingerprint on the maintainer's GitHub profile (Settings > SSH and GPG keys)
+# or at https://keys.openpgp.org
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 
 # Download the detached signature

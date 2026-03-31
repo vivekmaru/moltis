@@ -196,6 +196,8 @@ for file in "${ARTIFACTS[@]}"; do
       exit 1
     fi
     echo "  SHA256 verified"
+  else
+    echo "  WARNING: no SHA256 checksum found for $name — skipping integrity check" >&2
   fi
 
   gpg --batch "${GPG_SIGN_ARGS[@]}" --armor --detach-sign "$file"
@@ -219,6 +221,13 @@ fi
 
 echo ""
 echo "Uploading .asc files to release $VERSION..."
+
+# Check if any .asc files already exist on the release
+EXISTING_ASC="$(gh release view "$VERSION" --repo "$REPO" --json assets --jq '[.assets[].name | select(endswith(".asc"))] | join(", ")')"
+if [[ -n "$EXISTING_ASC" ]]; then
+  echo "  NOTE: replacing existing signatures: $EXISTING_ASC"
+fi
+
 gh release upload "$VERSION" \
   --repo "$REPO" \
   --clobber \
