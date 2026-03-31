@@ -7,11 +7,12 @@ use {
     anyhow::{Context, Result, anyhow},
     async_trait::async_trait,
     reqwest::{
-        Client,
+        Client, Error as ReqwestError,
         multipart::{Form, Part},
     },
     secrecy::{ExposeSecret, Secret},
     serde::Deserialize,
+    std::time::Duration,
     tracing::{debug, info, warn},
 };
 
@@ -25,6 +26,8 @@ const API_BASE: &str = "https://api.elevenlabs.io/v1";
 
 /// Default model (Scribe v2 for best quality and 150ms latency).
 const DEFAULT_MODEL: &str = "scribe_v2";
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// ElevenLabs Scribe STT provider.
 #[derive(Clone)]
@@ -53,11 +56,28 @@ impl Default for ElevenLabsStt {
 }
 
 impl ElevenLabsStt {
+    fn build_client() -> Client {
+        match Client::builder()
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to build ElevenLabs STT HTTP client with timeouts, falling back to default client"
+                );
+                Client::new()
+            },
+        }
+    }
+
     /// Create a new ElevenLabs Scribe STT provider.
     #[must_use]
     pub fn new(api_key: Option<Secret<String>>) -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             api_key,
             model: DEFAULT_MODEL.into(),
             language: None,
@@ -73,7 +93,7 @@ impl ElevenLabsStt {
         language: Option<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
             language,
@@ -168,9 +188,18 @@ impl SttProvider for ElevenLabsStt {
             .multipart(form)
             .send()
             .await
+            .map_err(|error| {
+                log_send_error(&error, &self.model, request.format, audio_len);
+                error
+            })
             .context("failed to send ElevenLabs transcription request")?;
 
         let status = response.status();
+        info!(
+            model = %self.model,
+            status = %status,
+            "ElevenLabs STT response received"
+        );
         let body = response
             .text()
             .await
@@ -200,6 +229,14 @@ impl SttProvider for ElevenLabsStt {
             })
             .context("failed to parse ElevenLabs response")?;
 
+        info!(
+            model = %self.model,
+            text_len = el_response.text.trim().chars().count(),
+            language = el_response.language_code.as_deref().unwrap_or("unknown"),
+            word_count = el_response.words.as_ref().map_or(0, Vec::len),
+            "ElevenLabs STT transcript parsed"
+        );
+
         Ok(Transcript {
             text: el_response.text,
             language: el_response.language_code,
@@ -217,6 +254,18 @@ impl SttProvider for ElevenLabsStt {
             }),
         })
     }
+}
+
+fn log_send_error(error: &ReqwestError, model: &str, format: AudioFormat, audio_len: usize) {
+    warn!(
+        model,
+        format = ?format,
+        audio_bytes = audio_len,
+        is_timeout = error.is_timeout(),
+        is_connect = error.is_connect(),
+        error = %error,
+        "failed to send ElevenLabs STT request"
+    );
 }
 
 // ── API Types ──────────────────────────────────────────────────────────────
