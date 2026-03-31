@@ -174,11 +174,14 @@ for file in "${FILES[@]}"; do
     continue
   fi
 
-  if gpg --batch --verify "$asc" "$file" 2>/dev/null; then
-    echo "  GPG: OK"
+  GPG_OUTPUT="$(gpg --batch --verify "$asc" "$file" 2>&1)" && GPG_RC=0 || GPG_RC=$?
+  if [[ $GPG_RC -eq 0 ]]; then
+    # Show the signer identity (e.g. "Good signature from ...")
+    echo "$GPG_OUTPUT" | grep -i 'good signature' | sed 's/^/  /' || echo "  GPG: OK"
     PASS=$((PASS + 1))
   else
     echo "  FAIL: GPG signature verification failed" >&2
+    echo "$GPG_OUTPUT" | sed 's/^/    /' >&2
     FAIL=$((FAIL + 1))
   fi
 done
