@@ -2087,7 +2087,14 @@ pub async fn start_gateway(
     let browser_for_warmup = Arc::clone(&banner.browser_for_lifecycle);
     let browser_tool_for_warmup = banner.browser_tool_for_warmup.clone();
     #[cfg(feature = "ngrok")]
-    let ngrok_status = banner.ngrok_controller.apply(&config.ngrok).await?;
+    let (ngrok_status, ngrok_startup_error) =
+        match banner.ngrok_controller.apply(&config.ngrok).await {
+            Ok(status) => (status, None),
+            Err(error) => {
+                warn!(%error, "ngrok tunnel failed to start; gateway will continue without it");
+                (None, Some(error.to_string()))
+            },
+        };
 
     #[cfg(feature = "tls")]
     if tls_active {
@@ -2213,10 +2220,8 @@ pub async fn start_gateway(
         if let Some(passkey_warning) = status.passkey_warning.as_ref() {
             lines.push(format!("ngrok note: {passkey_warning}"));
         }
-    } else if config.ngrok.enabled {
-        lines.push(
-            "ngrok: enabled in config but this build does not include the ngrok feature".into(),
-        );
+    } else if let Some(error) = ngrok_startup_error.as_deref() {
+        lines.push(format!("ngrok: failed to start ({error})"));
     }
     #[cfg(not(feature = "ngrok"))]
     if config.ngrok.enabled {
