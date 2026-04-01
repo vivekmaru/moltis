@@ -101,7 +101,7 @@ export async function testModel(modelId) {
 			return { ok: true };
 		}
 
-		var message = res?.error?.message || "Model test failed.";
+		var message = res?.error?.serverMessage || res?.error?.message || "Model test failed.";
 		var lower = String(message).toLowerCase();
 		var shouldRetry = lower.includes(MODEL_SERVICE_NOT_CONFIGURED) && attempt < MODEL_TEST_RETRY_ATTEMPTS - 1;
 
