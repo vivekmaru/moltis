@@ -11264,13 +11264,20 @@ mod tests {
 
     #[tokio::test]
     async fn list_includes_created_at_in_response() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let recent_gpt = now - 10 * 24 * 60 * 60; // 10 days ago
+        let recent_babbage = now - 30 * 24 * 60 * 60; // 30 days ago
+
         let mut registry = ProviderRegistry::empty();
         registry.register(
             moltis_providers::ModelInfo {
                 id: "openai::gpt-5.3".to_string(),
                 provider: "openai".to_string(),
                 display_name: "GPT-5.3".to_string(),
-                created_at: Some(1_770_000_000),
+                created_at: Some(recent_gpt),
                 recommended: false,
             },
             Arc::new(StaticProvider {
@@ -11283,7 +11290,7 @@ mod tests {
                 id: "openai::babbage-002".to_string(),
                 provider: "openai".to_string(),
                 display_name: "babbage-002".to_string(),
-                created_at: Some(1_760_000_000),
+                created_at: Some(recent_babbage),
                 recommended: false,
             },
             Arc::new(StaticProvider {
@@ -11314,13 +11321,13 @@ mod tests {
 
         // Verify createdAt is present and correct.
         let gpt = arr.iter().find(|m| m["id"] == "openai::gpt-5.3").unwrap();
-        assert_eq!(gpt["createdAt"], 1_770_000_000);
+        assert_eq!(gpt["createdAt"], recent_gpt);
 
         let babbage = arr
             .iter()
             .find(|m| m["id"] == "openai::babbage-002")
             .unwrap();
-        assert_eq!(babbage["createdAt"], 1_760_000_000);
+        assert_eq!(babbage["createdAt"], recent_babbage);
 
         let claude = arr
             .iter()
@@ -11335,7 +11342,7 @@ mod tests {
             .iter()
             .find(|m| m["id"] == "openai::gpt-5.3")
             .unwrap();
-        assert_eq!(gpt_all["createdAt"], 1_770_000_000);
+        assert_eq!(gpt_all["createdAt"], recent_gpt);
     }
 
     #[tokio::test]
