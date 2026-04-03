@@ -544,10 +544,7 @@ pub async fn ssh_doctor(
         .iter()
         .filter(|target| target.known_host.is_some())
         .count();
-    let vault_is_unsealed = match state.gateway.vault.as_ref() {
-        Some(vault) => vault.is_unsealed().await,
-        None => false,
-    };
+    let vault_is_unsealed = vault_is_unsealed(&state).await;
 
     let active_route = if exec_host == "ssh" {
         default_target
@@ -610,6 +607,19 @@ pub async fn ssh_doctor(
         active_route,
         checks,
     })
+}
+
+#[cfg(feature = "vault")]
+async fn vault_is_unsealed(state: &crate::server::AppState) -> bool {
+    match state.gateway.vault.as_ref() {
+        Some(vault) => vault.is_unsealed().await,
+        None => false,
+    }
+}
+
+#[cfg(not(feature = "vault"))]
+async fn vault_is_unsealed(_state: &crate::server::AppState) -> bool {
+    false
 }
 
 pub async fn ssh_doctor_test_active(
