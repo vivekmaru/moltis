@@ -7,30 +7,84 @@ import { computed, signal } from "@preact/signals";
 
 // ── Session class ────────────────────────────────────────────
 
+function assignSessionIdentityFields(target, serverData) {
+	target.label = serverData.label || "";
+	target.model = serverData.model || "";
+	target.provider = serverData.provider || "";
+	target.projectId = serverData.projectId || "";
+	target.workspace = serverData.workspace || target.projectId || "";
+	target.workspaceLabel = serverData.workspaceLabel || "";
+	target.createdAt = serverData.createdAt || 0;
+	target.worktree_branch = serverData.worktree_branch || "";
+	target.parentSessionKey = serverData.parentSessionKey || "";
+	target.forkPoint = serverData.forkPoint == null ? null : serverData.forkPoint;
+}
+
+function assignSessionCountFields(target, serverData, preserveCounts) {
+	if (preserveCounts) {
+		// Only accept server counts when they've caught up with optimistic
+		// client bumps. Authoritative resets (/clear, switchSession) use
+		// syncCounts() which sets messageCount directly before any fetch.
+		var serverCount = serverData.messageCount || 0;
+		if (serverCount >= target.messageCount) {
+			target.messageCount = serverCount;
+			target.lastSeenMessageCount = serverData.lastSeenMessageCount || 0;
+			target.preview = serverData.preview || "";
+			target.updatedAt = serverData.updatedAt || 0;
+		}
+	} else {
+		target.messageCount = serverData.messageCount || 0;
+		target.lastSeenMessageCount = serverData.lastSeenMessageCount || 0;
+		target.preview = serverData.preview || "";
+		target.updatedAt = serverData.updatedAt || 0;
+	}
+}
+
+function assignSessionRouteFields(target, serverData) {
+	target.sandbox_enabled = serverData.sandbox_enabled;
+	target.sandbox_image = serverData.sandbox_image || null;
+	target.channelBinding = serverData.channelBinding || null;
+	target.agent_id = serverData.agent_id || "main";
+	target.node_id = serverData.node_id || null;
+	target.surface = serverData.surface || "web";
+	target.sessionKind = serverData.sessionKind || "web";
+	target.executionRoute = serverData.executionRoute || "local";
+	target.machine = serverData.machine || null;
+	target.externalAgentSource = serverData.externalAgentSource || "native";
+}
+
+function assignSessionStatusFields(target, serverData) {
+	target.mcpDisabled = serverData.mcpDisabled;
+	target.archived = serverData.archived;
+	target.activeChannel = serverData.activeChannel;
+}
+
+function assignSessionFields(target, serverData, { preserveCounts = false } = {}) {
+	assignSessionIdentityFields(target, serverData);
+	assignSessionCountFields(target, serverData, preserveCounts);
+	assignSessionRouteFields(target, serverData);
+	assignSessionStatusFields(target, serverData);
+}
+
+function applySessionClientFlags(session, serverData) {
+	if (serverData._localUnread) session.localUnread.value = true;
+	if (serverData._replying || serverData.replying) session.replying.value = true;
+	return session;
+}
+
+function hydrateSession(existingSession, serverData) {
+	var session = existingSession || new Session(serverData);
+	if (existingSession) {
+		existingSession.update(serverData);
+	}
+	return applySessionClientFlags(session, serverData);
+}
+
 export class Session {
 	constructor(serverData) {
 		// Server fields (plain properties, set on construction/update)
 		this.key = serverData.key;
-		this.label = serverData.label || "";
-		this.model = serverData.model || "";
-		this.provider = serverData.provider || "";
-		this.projectId = serverData.projectId || "";
-		this.messageCount = serverData.messageCount || 0;
-		this.lastSeenMessageCount = serverData.lastSeenMessageCount || 0;
-		this.preview = serverData.preview || "";
-		this.updatedAt = serverData.updatedAt || 0;
-		this.createdAt = serverData.createdAt || 0;
-		this.worktree_branch = serverData.worktree_branch || "";
-		this.sandbox_enabled = serverData.sandbox_enabled;
-		this.sandbox_image = serverData.sandbox_image || null;
-		this.channelBinding = serverData.channelBinding || null;
-		this.parentSessionKey = serverData.parentSessionKey || "";
-		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
-		this.agent_id = serverData.agent_id || "main";
-		this.node_id = serverData.node_id || null;
-		this.mcpDisabled = serverData.mcpDisabled;
-		this.archived = serverData.archived;
-		this.activeChannel = serverData.activeChannel;
+		assignSessionFields(this, serverData);
 		this.version = serverData.version || 0;
 
 		// Client signals (reactive, per-session)
@@ -61,32 +115,7 @@ export class Session {
 		var incoming = serverData.version || 0;
 		if (incoming > 0 && this.version > 0 && incoming < this.version) return false;
 		this.version = incoming || this.version;
-		this.label = serverData.label || "";
-		this.model = serverData.model || "";
-		this.provider = serverData.provider || "";
-		this.projectId = serverData.projectId || "";
-		// Only accept server counts when they've caught up with optimistic
-		// client bumps. Authoritative resets (/clear, switchSession) use
-		// syncCounts() which sets messageCount directly before any fetch.
-		var serverCount = serverData.messageCount || 0;
-		if (serverCount >= this.messageCount) {
-			this.messageCount = serverCount;
-			this.lastSeenMessageCount = serverData.lastSeenMessageCount || 0;
-			this.preview = serverData.preview || "";
-			this.updatedAt = serverData.updatedAt || 0;
-		}
-		this.createdAt = serverData.createdAt || 0;
-		this.worktree_branch = serverData.worktree_branch || "";
-		this.sandbox_enabled = serverData.sandbox_enabled;
-		this.sandbox_image = serverData.sandbox_image || null;
-		this.channelBinding = serverData.channelBinding || null;
-		this.parentSessionKey = serverData.parentSessionKey || "";
-		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
-		this.agent_id = serverData.agent_id || "main";
-		this.node_id = serverData.node_id || null;
-		this.mcpDisabled = serverData.mcpDisabled;
-		this.archived = serverData.archived;
-		this.activeChannel = serverData.activeChannel;
+		assignSessionFields(this, serverData, { preserveCounts: true });
 		this.updateBadge();
 		this.dataVersion.value++;
 		return true;
@@ -139,29 +168,8 @@ export var activeSession = computed(() => {
  * New keys get fresh instances. Missing keys are dropped.
  */
 export function setAll(serverSessions) {
-	var existing = {};
-	for (var s of sessions.value) {
-		existing[s.key] = s;
-	}
-
-	var result = [];
-	for (var data of serverSessions) {
-		var prev = existing[data.key];
-		if (prev) {
-			prev.update(data);
-			// Preserve client-side flags from old patched objects
-			if (data._localUnread) prev.localUnread.value = true;
-			if (data._replying || data.replying) prev.replying.value = true;
-			result.push(prev);
-		} else {
-			var session = new Session(data);
-			if (data._localUnread) session.localUnread.value = true;
-			if (data._replying || data.replying) session.replying.value = true;
-			result.push(session);
-		}
-	}
-
-	sessions.value = result;
+	var existing = new Map(sessions.value.map((session) => [session.key, session]));
+	sessions.value = serverSessions.map((data) => hydrateSession(existing.get(data.key), data));
 }
 
 /**
@@ -205,7 +213,7 @@ export function fetch() {
 			if (!Array.isArray(payload)) return;
 			setAll(payload);
 		})
-		.catch(() => {});
+		.catch(() => null);
 }
 
 /** Notify Preact that session data changed (triggers re-render). */

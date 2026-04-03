@@ -54,12 +54,16 @@ moltis
 ```
 
 On first launch:
-1. Open the URL shown in your browser (e.g., `http://localhost:13131`)
-2. Add your LLM API key
-3. Start chatting!
+1. Open the URL shown in your browser
+2. Enter the setup code printed in the terminal
+3. Create a password or register a passkey
+4. Add your LLM provider
+5. Start chatting
 
 ```admonish note
-Authentication is only required when accessing Moltis from a non-localhost address. On localhost, you can start using it immediately.
+On first launch, Moltis prints a setup code in the terminal. Use that code to
+finish password or passkey setup in the browser. After setup is complete, auth
+is enforced on loopback and remote access alike.
 ```
 
 → [Full Quickstart Guide](quickstart.md)
@@ -98,6 +102,7 @@ Authentication is only required when accessing Moltis from a non-localhost addre
 ### Getting Started
 - **[Quickstart](quickstart.md)** — Up and running in 5 minutes
 - **[Installation](installation.md)** — All installation methods
+- **[Usage Guide](usage-guide.md)** — Day-to-day workflows after first boot
 - **[Configuration](configuration.md)** — `moltis.toml` reference
 - **[End-to-End Testing](e2e-testing.md)** — Browser regression coverage for the web UI
 
@@ -111,6 +116,9 @@ Authentication is only required when accessing Moltis from a non-localhost addre
 - **[Docker](docker.md)** — Container deployment
 
 ### Architecture
+- **[Architecture](architecture.md)** — System layout, crate map, and data flow
+- **[Advanced Use Cases](advanced-use-cases.md)** — Higher-leverage production patterns
+- **[Integrations](integrations.md)** — Codex, Claude Code, MCP, and workflow integrations
 - **[Streaming](streaming.md)** — How real-time streaming works
 - **[Metrics & Tracing](metrics-and-tracing.md)** — Observability
 
@@ -118,12 +126,12 @@ Authentication is only required when accessing Moltis from a non-localhost addre
 
 Moltis applies defense in depth:
 
-- **Authentication** — Password or passkey (WebAuthn) required for non-localhost access
+- **Authentication** — Password or passkey (WebAuthn) after bootstrap; setup-code-gated onboarding on first run
 - **SSRF Protection** — Blocks requests to internal networks
 - **Secret Handling** — `secrecy::Secret` zeroes memory on drop
-- **Sandboxed Execution** — Commands never run on the host
+- **Sandboxed Execution** — Sandbox-first execution with explicit local/SSH/node routing
 - **Origin Validation** — Prevents Cross-Site WebSocket Hijacking
-- **No Unsafe Code** — `unsafe` is denied workspace-wide
+- **Tight unsafe surface** — the core gateway path stays in safe Rust, with small isolated FFI/bridge boundaries
 
 ## Community
 

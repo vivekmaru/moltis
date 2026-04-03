@@ -479,7 +479,8 @@ async fn list_api_keys_handler(
 #[derive(serde::Deserialize)]
 struct CreateApiKeyRequest {
     label: String,
-    /// Optional scopes. If omitted or empty, the key has full access.
+    /// Optional scopes. If omitted or empty, the stored key will verify with
+    /// an empty scope list and should not be granted operator permissions.
     scopes: Option<Vec<String>>,
 }
 

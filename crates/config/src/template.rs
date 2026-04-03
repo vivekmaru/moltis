@@ -32,8 +32,8 @@ update_releases_url = "https://www.moltis.org/releases.json"    # Releases manif
 # ══════════════════════════════════════════════════════════════════════════════
 
 [auth]
-disabled = false                  # true = disable auth entirely (DANGEROUS if exposed)
-                                  # When disabled, anyone with network access can use moltis
+disabled = false                  # true = relax auth for loopback/bootstrap use
+                                  # Remote/proxied requests still stay gated until setup completes
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GRAPHQL

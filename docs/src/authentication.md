@@ -40,12 +40,13 @@ HTTP headers.
 
 | # | Condition | Result | Auth method |
 |---|-----------|--------|-------------|
-| 1 | `auth_disabled` is true | **Allowed** | Loopback |
-| 2 | Setup not complete + local connection | **Allowed** | Loopback |
-| 3 | Setup not complete + remote connection | **SetupRequired** | — |
-| 4 | Valid session cookie | **Allowed** | Password |
-| 5 | Valid Bearer API key | **Allowed** | ApiKey |
-| 6 | None of the above | **Unauthorized** | — |
+| 1 | `auth_disabled` is true + local connection | **Allowed** | Loopback |
+| 2 | `auth_disabled` is true + remote connection | **SetupRequired** | — |
+| 3 | Setup not complete + local connection | **Allowed** | Loopback |
+| 4 | Setup not complete + remote connection | **SetupRequired** | — |
+| 5 | Valid session cookie | **Allowed** | Password |
+| 6 | Valid Bearer API key | **Allowed** | ApiKey |
+| 7 | None of the above | **Unauthorized** | — |
 
 ```admonish info title="What is 'setup complete'?"
 Setup is complete when at least one credential (password or passkey) has
@@ -68,8 +69,8 @@ The decision matrix above implements a three-tier authentication model:
 
 | Scenario | No credentials | Credentials configured |
 |----------|---------------|----------------------|
-| Local browser on `localhost:18789` | Full access (Tier 2) | Login required (Tier 1) |
-| Local CLI/wscat on `localhost:18789` | Full access (Tier 2) | Login required (Tier 1) |
+| Local browser on `localhost:18789` | Loopback bootstrap access (Tier 2) | Login required (Tier 1) |
+| Local CLI/wscat on `localhost:18789` | Loopback bootstrap access (Tier 2) | Login required (Tier 1) |
 | Internet via reverse proxy | Onboarding only (Tier 3) | Login required (Tier 1) |
 | `MOLTIS_BEHIND_PROXY=true`, any source | Onboarding only (Tier 3) | Login required (Tier 1) |
 
@@ -193,10 +194,11 @@ direct socket address.
 On first run (no credentials configured):
 
 1. A random 6-digit **setup code** is printed to the terminal
-2. Local connections get full access (Tier 2) — no setup code needed
-3. Remote connections are redirected to `/onboarding` (Tier 3) — the
-   setup code is required to set a password or register a passkey
-4. After setting up, the setup code is cleared and a session is created
+2. Local connections can reach the onboarding/bootstrap flow (Tier 2)
+3. Remote connections are redirected to `/onboarding` or `/setup-required`
+   (Tier 3)
+4. The setup code is required to set a password or register a passkey
+5. After setting up, the setup code is cleared and a session is created
 
 ```admonish warning
 The setup code is single-use and only valid until the first credential is
@@ -210,7 +212,8 @@ The "Remove all auth" action in Settings:
 1. Deletes all passwords, passkeys, sessions, and API keys
 2. Sets `auth_disabled = true` in config
 3. Generates a new setup code for re-setup
-4. All subsequent requests are allowed through (Tier 1 check: `auth_disabled`)
+4. Loopback requests can reach bootstrap flows again, while remote/proxied
+   requests stay in `SetupRequired` until setup completes
 
 To re-enable auth, complete the setup flow again with the new setup code.
 

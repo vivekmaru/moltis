@@ -95,6 +95,9 @@ pub trait SessionService: Send + Sync {
     async fn preview(&self, params: Value) -> ServiceResult;
     async fn resolve(&self, params: Value) -> ServiceResult;
     async fn patch(&self, params: Value) -> ServiceResult;
+    async fn workspace_overview(&self, params: Value) -> ServiceResult;
+    async fn coordination_set(&self, params: Value) -> ServiceResult;
+    async fn external_attach(&self, params: Value) -> ServiceResult;
     async fn voice_generate(&self, params: Value) -> ServiceResult;
     async fn share_create(&self, params: Value) -> ServiceResult;
     async fn share_list(&self, params: Value) -> ServiceResult;
@@ -128,6 +131,18 @@ impl SessionService for NoopSessionService {
 
     async fn patch(&self, _p: Value) -> ServiceResult {
         Ok(serde_json::json!({}))
+    }
+
+    async fn workspace_overview(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!({}))
+    }
+
+    async fn coordination_set(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!({}))
+    }
+
+    async fn external_attach(&self, _p: Value) -> ServiceResult {
+        Err("session external attach not available".into())
     }
 
     async fn voice_generate(&self, _p: Value) -> ServiceResult {

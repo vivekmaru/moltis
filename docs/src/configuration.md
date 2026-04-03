@@ -207,18 +207,22 @@ session_export = false
 
 ## Authentication
 
-Authentication is **only required when accessing Moltis from a non-localhost address**. When running on `localhost` or `127.0.0.1`, no authentication is needed by default.
-
-When you access Moltis from a network address (e.g., `http://192.168.1.100:13131`), a one-time setup code is printed to the terminal. Use it to set up a password or passkey.
+On first boot, Moltis prints a setup code to the terminal. Use that code to
+create a password or register a passkey in the browser. After setup completes,
+authentication is enforced for loopback and remote access alike.
 
 ```toml
 [auth]
-disabled = false                # Set true to disable auth entirely
+disabled = false                # Loopback bootstrap mode; remote access still stays gated
 ```
 
 ```admonish warning
-Only set `disabled = true` if Moltis is running on a trusted private network. Never expose an unauthenticated instance to the internet.
+`auth.disabled = true` is for trusted loopback/bootstrap scenarios. It does
+not make remote access public, but it does weaken local protection on the host
+running Moltis. Prefer leaving it `false` for normal operation.
 ```
+
+See [Authentication](authentication.md) for the full decision matrix.
 
 ## Hooks
 

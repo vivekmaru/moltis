@@ -6,7 +6,10 @@
 
 use serde::Deserialize;
 
-use crate::services::ServiceError;
+use {
+    crate::services::ServiceError,
+    moltis_sessions::{coordinator::CoordinationPatch, metadata::ExternalAgentSource},
+};
 
 /// Params for `session.patch`.
 ///
@@ -34,6 +37,74 @@ pub struct PatchParams {
     pub mcp_disabled: Option<Option<bool>>,
     #[serde(default, deserialize_with = "double_option", alias = "sandbox_enabled")]
     pub sandbox_enabled: Option<Option<bool>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        alias = "external_agent_source"
+    )]
+    pub external_agent_source: Option<Option<ExternalAgentSource>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoordinationSetParams {
+    pub key: String,
+    #[serde(default, deserialize_with = "double_option")]
+    pub decision: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "current_plan")]
+    pub current_plan: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "next_action")]
+    pub next_action: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        alias = "route_constraints"
+    )]
+    pub route_constraints: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "durable_notes")]
+    pub durable_notes: Option<Option<String>>,
+}
+
+impl From<CoordinationSetParams> for CoordinationPatch {
+    fn from(value: CoordinationSetParams) -> Self {
+        Self {
+            decision: value.decision,
+            current_plan: value.current_plan,
+            next_action: value.next_action,
+            route_constraints: value.route_constraints,
+            durable_notes: value.durable_notes,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalAttachParams {
+    pub key: String,
+    pub source: ExternalAgentSource,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default, alias = "imported_session_key")]
+    pub imported_session_key: Option<String>,
+    #[serde(default, alias = "imported_message_count")]
+    pub imported_message_count: Option<u32>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub decision: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "current_plan")]
+    pub current_plan: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "next_action")]
+    pub next_action: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        alias = "route_constraints"
+    )]
+    pub route_constraints: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", alias = "durable_notes")]
+    pub durable_notes: Option<Option<String>>,
 }
 
 /// Deserialize a field as `Some(inner)` when present (even if null),
@@ -121,6 +192,7 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
         assert_eq!(p.sandbox_enabled, Some(Some(true)));
         assert_eq!(p.mcp_disabled, Some(Some(false)));
+        assert!(p.external_agent_source.is_none());
     }
 
     #[test]
@@ -152,6 +224,7 @@ mod tests {
             "sandbox_image": "custom:latest",
             "sandbox_enabled": false,
             "mcp_disabled": true,
+            "external_agent_source": "codex",
         }))
         .unwrap();
         assert_eq!(p.project_id, Some(Some("proj-1".to_string())));
@@ -159,6 +232,10 @@ mod tests {
         assert_eq!(p.sandbox_image, Some(Some("custom:latest".to_string())));
         assert_eq!(p.sandbox_enabled, Some(Some(false)));
         assert_eq!(p.mcp_disabled, Some(Some(true)));
+        assert_eq!(
+            p.external_agent_source,
+            Some(Some(ExternalAgentSource::Codex))
+        );
     }
 
     #[test]
@@ -180,6 +257,41 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(p.project_id, Some(Some("proj-1".to_string())));
+    }
+
+    #[test]
+    fn coordination_set_params_support_null_and_strings() {
+        let p: CoordinationSetParams = serde_json::from_value(json!({
+            "key": "main",
+            "decision": "Make route visibility explicit",
+            "nextAction": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            p.decision,
+            Some(Some("Make route visibility explicit".to_string()))
+        );
+        assert_eq!(p.next_action, Some(None));
+    }
+
+    #[test]
+    fn external_attach_params_parse_source_and_patch_fields() {
+        let p: ExternalAttachParams = serde_json::from_value(json!({
+            "key": "main",
+            "source": "claude_code",
+            "title": "Review auth middleware",
+            "summary": "Attached a Claude Code run summary.",
+            "decision": "Keep auth local-first",
+            "durableNotes": "Remember to tighten setup throttling",
+        }))
+        .unwrap();
+        assert_eq!(p.source, ExternalAgentSource::ClaudeCode);
+        assert_eq!(p.title.as_deref(), Some("Review auth middleware"));
+        assert_eq!(p.decision, Some(Some("Keep auth local-first".to_string())));
+        assert_eq!(
+            p.durable_notes,
+            Some(Some("Remember to tighten setup throttling".to_string()))
+        );
     }
 
     #[test]

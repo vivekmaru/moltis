@@ -24,10 +24,21 @@ You'll see output like:
 
 ```
 🚀 Moltis gateway starting...
-🌐 Open http://localhost:13131 in your browser
+🌐 Open https://localhost:13131 in your browser
+🔐 setup code: 123456
 ```
 
-## 3. Configure a Provider
+The exact URL depends on your bind and TLS configuration. On first run, use the
+setup code from the terminal to create a password or register a passkey.
+
+## 3. Finish Setup
+
+1. Open the browser URL shown in the terminal.
+2. Enter the setup code.
+3. Create a password or register a passkey.
+4. Sign in if prompted.
+
+## 4. Configure a Provider
 
 You need an LLM provider configured to chat. The fastest options:
 
@@ -57,7 +68,7 @@ Or configure via the web UI: **Settings** → **Providers** → enter your API k
 
 See [Providers](providers.md) for the full list of supported providers.
 
-## 4. Chat!
+## 5. Chat!
 
 Go to the **Chat** tab and start a conversation:
 

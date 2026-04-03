@@ -10,6 +10,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAgentSource {
+    #[default]
+    Native,
+    Codex,
+    ClaudeCode,
+    Copilot,
+    Api,
+    Imported,
+}
+
+impl ExternalAgentSource {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude_code",
+            Self::Copilot => "copilot",
+            Self::Api => "api",
+            Self::Imported => "imported",
+        }
+    }
+}
+
 /// A single session entry in the metadata index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEntry {
@@ -47,6 +73,8 @@ pub struct SessionEntry {
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_agent_source: Option<ExternalAgentSource>,
     #[serde(default)]
     pub version: u64,
 }
@@ -137,6 +165,7 @@ impl SessionMetadata {
                 preview: None,
                 agent_id: None,
                 node_id: None,
+                external_agent_source: None,
                 version: 0,
             })
     }
@@ -231,6 +260,19 @@ impl SessionMetadata {
         }
     }
 
+    /// Set the external agent source associated with a session.
+    pub fn set_external_agent_source(
+        &mut self,
+        key: &str,
+        external_agent_source: Option<ExternalAgentSource>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.external_agent_source = external_agent_source;
+            entry.updated_at = now_ms();
+            entry.version += 1;
+        }
+    }
+
     /// List all sessions belonging to a given agent.
     pub fn list_by_agent_id(&self, agent_id: &str) -> Vec<SessionEntry> {
         let mut entries: Vec<_> = self
@@ -303,6 +345,7 @@ struct SessionRow {
     preview: Option<String>,
     agent_id: Option<String>,
     node_id: Option<String>,
+    external_agent_source: Option<String>,
     version: i64,
 }
 
@@ -329,6 +372,10 @@ impl From<SessionRow> for SessionEntry {
             preview: r.preview,
             agent_id: r.agent_id,
             node_id: r.node_id,
+            external_agent_source: r
+                .external_agent_source
+                .as_deref()
+                .and_then(|value| serde_json::from_str(&format!("\"{value}\"")).ok()),
             version: r.version as u64,
         }
     }
@@ -393,6 +440,7 @@ impl SqliteSessionMetadata {
                 preview             TEXT,
                 agent_id            TEXT,
                 node_id             TEXT,
+                external_agent_source TEXT,
                 version             INTEGER NOT NULL DEFAULT 0
             )"#,
         )
@@ -678,6 +726,28 @@ impl SqliteSessionMetadata {
             "UPDATE sessions SET node_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
         )
         .bind(node_id)
+        .bind(now)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Set the external agent source associated with this session.
+    pub async fn set_external_agent_source(
+        &self,
+        key: &str,
+        external_agent_source: Option<ExternalAgentSource>,
+    ) -> Result<()> {
+        let now = now_ms() as i64;
+        let value = external_agent_source.map(ExternalAgentSource::as_str);
+        sqlx::query(
+            "UPDATE sessions SET external_agent_source = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+        )
+        .bind(value)
         .bind(now)
         .bind(key)
         .execute(&self.pool)

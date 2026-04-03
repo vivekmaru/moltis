@@ -121,16 +121,19 @@ moltis
 
 On first launch:
 
-1. Open `http://localhost:<port>` in your browser (the port is shown in the terminal output)
-2. Configure your LLM provider (API key)
-3. Start chatting!
+1. Open the browser URL shown in the terminal
+2. Enter the setup code printed in the terminal
+3. Create a password or register a passkey
+4. Configure your LLM provider
+5. Start chatting
 
 ```admonish tip
 Moltis picks a random available port on first install to avoid conflicts. The port is saved in your config and reused on subsequent runs.
 ```
 
 ```admonish note
-Authentication is only required when accessing Moltis from a non-localhost address (e.g., over the network). When this happens, a one-time setup code is printed to the terminal for initial authentication setup.
+The exact first-run URL depends on your bind and TLS configuration. After setup
+completes, authentication applies on loopback and remote access alike.
 ```
 
 ## Verify Installation
