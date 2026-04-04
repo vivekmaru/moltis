@@ -84,7 +84,7 @@ up with less reconstruction.
 The intended workflow for Codex, Claude Code, or Copilot handoff is:
 
 1. Bind the session to the right workspace/project.
-2. Keep the execution route visible before running commands.
+2. Pick the execution machine explicitly before running commands.
 3. Attach external-agent work when something important happened outside the
    Moltis web UI.
 4. Update the coordination loop when you make a decision or define the next
@@ -96,6 +96,10 @@ based:
 - `sessions.external.attach` records an external run summary in workspace state
 - `sessions.coordination.set` updates decision/plan/next-action notes
 - `sessions.workspace_overview` returns the combined state used by the UI
+- `machines.list` and `machines.get` describe the available local, sandbox,
+  SSH, and node routes
+- `machines.set_session` makes the session-to-machine binding explicit instead
+  of inferring it from legacy route fields
 
 ## Recommended Settings
 
@@ -132,7 +136,15 @@ would run.
 
 - **Settings → SSH** for managed keys, named targets, host pinning, and doctor
   checks
-- **Settings → Nodes** for paired remote machines and route selection
+- **Settings → Nodes** for paired remote machines and route inventory
+- Use the chat toolbar machine selector to switch the active session between:
+  - local host
+  - sandbox
+  - paired nodes
+  - managed SSH targets
+
+The selector only appears when there is a meaningful choice to make. A
+single-machine session keeps the simpler local-host view.
 
 ### Share access safely
 

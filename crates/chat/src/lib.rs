@@ -1181,6 +1181,60 @@ async fn effective_execution_route(
     ExecutionRoute::Local
 }
 
+fn machine_payload(
+    route: ExecutionRoute,
+    session_entry: Option<&SessionEntry>,
+    sandbox_available: bool,
+) -> Value {
+    let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
+    match route {
+        ExecutionRoute::Local => serde_json::json!({
+            "id": "local",
+            "kind": "local",
+            "route": "local",
+            "executionRoute": "local",
+            "label": "Local host",
+            "nodeId": Value::Null,
+            "trustState": "trusted_local",
+            "health": "ready",
+            "available": true,
+        }),
+        ExecutionRoute::Sandbox => serde_json::json!({
+            "id": "sandbox",
+            "kind": "sandbox",
+            "route": "sandbox",
+            "executionRoute": "sandbox",
+            "label": "Sandbox",
+            "nodeId": Value::Null,
+            "trustState": "sandboxed",
+            "health": if sandbox_available { "ready" } else { "unavailable" },
+            "available": sandbox_available,
+        }),
+        ExecutionRoute::Ssh => serde_json::json!({
+            "id": node_id.unwrap_or("ssh:unresolved"),
+            "kind": "ssh",
+            "route": "ssh",
+            "executionRoute": "ssh",
+            "label": "SSH target",
+            "nodeId": node_id,
+            "trustState": "managed_ssh",
+            "health": if node_id.is_some() { "ready" } else { "unavailable" },
+            "available": node_id.is_some(),
+        }),
+        ExecutionRoute::Node => serde_json::json!({
+            "id": node_id.unwrap_or("node:unresolved"),
+            "kind": "node",
+            "route": "node",
+            "executionRoute": "node",
+            "label": "Paired node",
+            "nodeId": node_id,
+            "trustState": "paired_node",
+            "health": if node_id.is_some() { "ready" } else { "unavailable" },
+            "available": node_id.is_some(),
+        }),
+    }
+}
+
 async fn load_coordination_state(
     state_store: Option<&Arc<SessionStateStore>>,
     session_key: &str,
@@ -4611,6 +4665,11 @@ impl ChatService for LiveChatService {
         };
         let execution_route =
             effective_execution_route(&self.state, &session_key, session_entry.as_ref()).await;
+        let current_machine = machine_payload(
+            execution_route,
+            session_entry.as_ref(),
+            self.state.sandbox_router().is_some(),
+        );
         let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
         let external_agent_source = normalize_external_agent_source(
             session_entry
@@ -4628,6 +4687,7 @@ impl ChatService for LiveChatService {
             "surface": surface_ctx.surface,
             "sessionKind": surface_ctx.session_kind,
             "executionRoute": execution_route.as_str(),
+            "machine": current_machine,
             "externalAgentSource": external_agent_source.as_str(),
         });
 
@@ -4860,6 +4920,11 @@ impl ChatService for LiveChatService {
                 "linkedProject": workspace_linked_project,
                 "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
                 "currentExecutionRoute": execution_route.as_str(),
+                "machine": machine_payload(
+                    execution_route,
+                    session_entry.as_ref(),
+                    self.state.sandbox_router().is_some(),
+                ),
                 "approvalMode": config.tools.exec.approval_mode,
                 "coordination": {
                     "decision": coordination.decision,

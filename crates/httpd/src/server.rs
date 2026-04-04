@@ -1324,6 +1324,53 @@ pub async fn prepare_gateway(
                             } else {
                                 "local"
                             };
+                            let sandbox_available = ws_state.sandbox_router.is_some();
+                            let machine = match execution_route {
+                                "sandbox" => serde_json::json!({
+                                    "id": "sandbox",
+                                    "kind": "sandbox",
+                                    "route": "sandbox",
+                                    "executionRoute": "sandbox",
+                                    "label": "Sandbox",
+                                    "nodeId": serde_json::Value::Null,
+                                    "trustState": "sandboxed",
+                                    "health": if sandbox_available { "ready" } else { "unavailable" },
+                                    "available": sandbox_available,
+                                }),
+                                "ssh" => serde_json::json!({
+                                    "id": entry.node_id.clone().unwrap_or_else(|| "ssh:unresolved".to_string()),
+                                    "kind": "ssh",
+                                    "route": "ssh",
+                                    "executionRoute": "ssh",
+                                    "label": "SSH target",
+                                    "nodeId": entry.node_id,
+                                    "trustState": "managed_ssh",
+                                    "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+                                    "available": entry.node_id.is_some(),
+                                }),
+                                "node" => serde_json::json!({
+                                    "id": entry.node_id.clone().unwrap_or_else(|| "node:unresolved".to_string()),
+                                    "kind": "node",
+                                    "route": "node",
+                                    "executionRoute": "node",
+                                    "label": "Paired node",
+                                    "nodeId": entry.node_id,
+                                    "trustState": "paired_node",
+                                    "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+                                    "available": entry.node_id.is_some(),
+                                }),
+                                _ => serde_json::json!({
+                                    "id": "local",
+                                    "kind": "local",
+                                    "route": "local",
+                                    "executionRoute": "local",
+                                    "label": "Local host",
+                                    "nodeId": serde_json::Value::Null,
+                                    "trustState": "trusted_local",
+                                    "health": "ready",
+                                    "available": true,
+                                }),
+                            };
                             let agent_id = entry.agent_id.clone();
                             payload["entry"] = serde_json::json!({
                                 "id": entry.id,
@@ -1352,6 +1399,7 @@ pub async fn prepare_gateway(
                                 "surface": surface,
                                 "sessionKind": session_kind,
                                 "executionRoute": execution_route,
+                                "machine": machine,
                                 "externalAgentSource": entry.external_agent_source.unwrap_or_default().as_str(),
                                 "version": entry.version,
                             });

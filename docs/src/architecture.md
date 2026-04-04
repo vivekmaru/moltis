@@ -130,6 +130,11 @@ remaining implicit in scattered fields:
 - `surface`
 - `external_agent_source`
 
+At the API/UI layer, the execution route is also normalized into a first-class
+`machine` object so the web app and prompt/debug surfaces can talk about one
+thing consistently whether the route is local, sandboxed, SSH, or a paired
+node.
+
 This split is deliberate: configuration, durable memory, auth material, and
 project context do not all change on the same cadence and should not share the
 same failure modes.
@@ -151,6 +156,27 @@ That state is consumed in three places:
 1. The web UI workspace overview
 2. Chat context inspection (`chat.context`)
 3. Prompt assembly, where coordinator notes are appended to project context
+
+## Machine Inventory and Binding
+
+The machine model is intentionally thin. It is a coordination layer, not a
+second infrastructure scheduler.
+
+- `machines.list` returns the current inventory of executable targets
+- `machines.get` resolves a single machine descriptor
+- `machines.set_session` binds a session to the selected machine
+
+Each machine descriptor carries:
+
+- stable identity (`local`, `sandbox`, node id, or managed SSH id)
+- execution route
+- trust state
+- health
+- availability
+- basic capability metadata
+
+This lets the web UI show route choice and trust posture directly, instead of
+leaving users to infer it from sandbox toggles or raw node ids.
 
 ## Where To Go Next
 

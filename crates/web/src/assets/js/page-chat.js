@@ -8,6 +8,7 @@ import { highlightCodeBlocks } from "./code-highlight.js";
 import { SessionHeader } from "./components/session-header.js";
 import { WorkspaceOverview } from "./components/workspace-overview.js";
 import { formatBytes, formatTokens, renderMarkdown, sendRpc, warmAudioPlayback } from "./helpers.js";
+import { bindMachineComboEvents, fetchMachines, unbindMachineEvents } from "./machine-selector.js";
 import {
 	clearPendingImages,
 	getPendingImages,
@@ -16,7 +17,6 @@ import {
 	teardownMediaDrop,
 } from "./media-drop.js";
 import { bindModelComboEvents, setSessionModel } from "./models.js";
-import { bindNodeComboEvents, fetchNodes, unbindNodeEvents } from "./nodes-selector.js";
 import { registerPrefix, sessionPath } from "./router.js";
 import { routes } from "./routes.js";
 import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
@@ -250,6 +250,8 @@ function renderContextSessionSection(card, data) {
 	if (sess.workspace) sessSection.appendChild(ctxRow("Workspace", sess.workspace));
 	if (sess.surface) sessSection.appendChild(ctxRow("Surface", sess.surface));
 	if (sess.executionRoute) sessSection.appendChild(ctxRow("Execution route", sess.executionRoute));
+	if (sess.machine?.label) sessSection.appendChild(ctxRow("Machine", sess.machine.label));
+	if (sess.machine?.trustState) sessSection.appendChild(ctxRow("Trust", sess.machine.trustState));
 	if (sess.externalAgentSource) sessSection.appendChild(ctxRow("Source", sess.externalAgentSource));
 	sessSection.appendChild(ctxRow("Tool Support", data.supportsTools === false ? "Disabled" : "Enabled"));
 	card.appendChild(sessSection);
@@ -1104,7 +1106,7 @@ var chatPageHTML =
 	'<div id="nodeCombo" class="model-combo hidden">' +
 	'<button id="nodeComboBtn" class="model-combo-btn" type="button">' +
 	'<span class="icon icon-sm icon-server" style="flex-shrink:0;"></span>' +
-	'<span id="nodeComboLabel">Local</span>' +
+	'<span id="nodeComboLabel">Local host</span>' +
 	'<span class="icon icon-sm icon-chevron-down model-combo-chevron"></span>' +
 	"</button>" +
 	'<div id="nodeDropdown" class="model-dropdown hidden" tabindex="-1">' +
@@ -1250,8 +1252,8 @@ function initNodeControls() {
 	S.setNodeComboLabel(S.$("nodeComboLabel"));
 	S.setNodeDropdown(S.$("nodeDropdown"));
 	S.setNodeDropdownList(S.$("nodeDropdownList"));
-	bindNodeComboEvents();
-	fetchNodes();
+	bindMachineComboEvents();
+	fetchMachines();
 }
 
 function initSandboxControls() {
@@ -1496,7 +1498,7 @@ registerPrefix(
 	function teardownChat() {
 		teardownVoiceInput();
 		teardownMediaDrop();
-		unbindNodeEvents();
+		unbindMachineEvents();
 		slashHideMenu();
 		if (chatMoreModalKeydownHandler) {
 			document.removeEventListener("keydown", chatMoreModalKeydownHandler);

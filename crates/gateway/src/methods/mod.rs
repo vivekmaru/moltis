@@ -91,6 +91,8 @@ const READ_METHODS: &[&str] = &[
     "heartbeat.runs",
     "system-presence",
     "last-heartbeat",
+    "machines.list",
+    "machines.get",
     "node.list",
     "node.describe",
     "chat.history",
@@ -157,6 +159,7 @@ const WRITE_METHODS: &[&str] = &[
     "stt.setProvider",
     "voicewake.set",
     "node.invoke",
+    "machines.set_session",
     "nodes.set_session",
     "chat.send",
     "chat.abort",
@@ -661,6 +664,40 @@ mod tests {
                 "UNAUTHORIZED",
             );
         }
+    }
+
+    #[test]
+    fn machines_read_methods_require_read() {
+        for method in &["machines.list", "machines.get"] {
+            assert!(
+                authorize_method(method, "operator", &scopes(&["operator.read"])).is_none(),
+                "read scope should authorize {method}"
+            );
+            assert_error_code(
+                authorize_method(method, "operator", &scopes(&[])),
+                "UNAUTHORIZED",
+            );
+        }
+    }
+
+    #[test]
+    fn machines_set_session_requires_write() {
+        assert!(
+            authorize_method(
+                "machines.set_session",
+                "operator",
+                &scopes(&["operator.write"])
+            )
+            .is_none()
+        );
+        assert_error_code(
+            authorize_method(
+                "machines.set_session",
+                "operator",
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
+        );
     }
 
     #[test]

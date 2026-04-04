@@ -26,8 +26,8 @@ import {
 	tokenSpeedTone,
 	toolCallSummary,
 } from "./helpers.js";
+import { restoreMachineSelection } from "./machine-selector.js";
 import { attachMessageVoiceControl } from "./message-voice.js";
-import { restoreNodeSelection } from "./nodes-selector.js";
 import { updateSessionProjectSelect } from "./project-combo.js";
 import { currentPrefix, navigate, sessionPath } from "./router.js";
 import { settingsPath } from "./routes.js";
@@ -561,7 +561,7 @@ export function clearAllSessions() {
 		return Promise.resolve({ ok: true, skipped: true });
 	}
 	return confirmDialog(
-		`Delete ${count} session${count !== 1 ? "s" : ""}? Main, channel-bound, and cron sessions will be kept.`,
+		`Delete ${count} session${count === 1 ? "" : "s"}? Main, channel-bound, and cron sessions will be kept.`,
 	).then((yes) => {
 		if (!yes) return { ok: false, cancelled: true };
 		return sendRpc("sessions.clear_all", {}).then((res) => {
@@ -617,7 +617,7 @@ function restoreSessionState(entry, projectId) {
 	S.setSessionExecPromptSymbol(effectiveSandboxRoute || S.hostExecIsRoot ? "#" : "$");
 	updateCommandInputUI();
 	restoreMcpToggle(!entry.mcpDisabled);
-	restoreNodeSelection(entry.node_id || null);
+	restoreMachineSelection(entry.machine?.id || entry.node_id || (entry.sandbox_enabled === true ? "sandbox" : "local"));
 	updateChatSessionHeader();
 }
 

@@ -1166,18 +1166,63 @@ impl LiveSessionService {
             .collect()
     }
 
-    fn machine_payload(route: ExecutionRoute, entry: &SessionEntry) -> Value {
-        let trust_state = match route {
-            ExecutionRoute::Local => "trusted_local",
-            ExecutionRoute::Sandbox => "sandboxed",
-            ExecutionRoute::Ssh => "managed_ssh",
-            ExecutionRoute::Node => "paired_node",
+    fn machine_payload(
+        route: ExecutionRoute,
+        entry: &SessionEntry,
+        sandbox_available: bool,
+    ) -> Value {
+        let (id, kind, trust_state, health, available) = match route {
+            ExecutionRoute::Local => ("local".to_string(), "local", "trusted_local", "ready", true),
+            ExecutionRoute::Sandbox => (
+                "sandbox".to_string(),
+                "sandbox",
+                "sandboxed",
+                if sandbox_available {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                sandbox_available,
+            ),
+            ExecutionRoute::Ssh => (
+                entry
+                    .node_id
+                    .clone()
+                    .unwrap_or_else(|| "ssh:unresolved".to_string()),
+                "ssh",
+                "managed_ssh",
+                if entry.node_id.is_some() {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                entry.node_id.is_some(),
+            ),
+            ExecutionRoute::Node => (
+                entry
+                    .node_id
+                    .clone()
+                    .unwrap_or_else(|| "node:unresolved".to_string()),
+                "node",
+                "paired_node",
+                if entry.node_id.is_some() {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                entry.node_id.is_some(),
+            ),
         };
         serde_json::json!({
+            "id": id,
+            "kind": kind,
             "route": route.as_str(),
+            "executionRoute": route.as_str(),
             "label": route.label(),
             "nodeId": entry.node_id,
             "trustState": trust_state,
+            "health": health,
+            "available": available,
         })
     }
 
@@ -1190,6 +1235,7 @@ impl LiveSessionService {
     ) -> Value {
         let surface = infer_session_surface(entry);
         let execution_route = self.effective_execution_route(entry).await;
+        let sandbox_available = self.sandbox_router.is_some();
         let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
         let external_source = normalize_session_source(entry.external_agent_source);
 
@@ -1221,7 +1267,7 @@ impl LiveSessionService {
             "surface": surface.surface,
             "sessionKind": surface.session_kind.as_str(),
             "executionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry),
+            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
             "externalAgentSource": external_source.as_str(),
             "version": entry.version,
         })
@@ -1286,6 +1332,7 @@ impl LiveSessionService {
 
         let approval_mode = moltis_config::discover_and_load().tools.exec.approval_mode;
         let execution_route = self.effective_execution_route(entry).await;
+        let sandbox_available = self.sandbox_router.is_some();
 
         serde_json::json!({
             "workspaceId": entry.project_id,
@@ -1293,7 +1340,7 @@ impl LiveSessionService {
             "linkedProject": linked_project,
             "currentBranch": entry.worktree_branch,
             "currentExecutionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry),
+            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
             "approvalMode": approval_mode,
             "coordination": Self::coordination_payload(&coordination),
             "memorySummary": coordination.durable_notes,
