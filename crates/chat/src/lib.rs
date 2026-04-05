@@ -1235,6 +1235,20 @@ fn machine_payload(
     }
 }
 
+fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
+    match route {
+        ExecutionRoute::Sandbox => "sandbox",
+        ExecutionRoute::Local | ExecutionRoute::Ssh | ExecutionRoute::Node => "host",
+    }
+}
+
+fn execution_root_for_route(route: ExecutionRoute, host_is_root: Option<bool>) -> Option<bool> {
+    match route {
+        ExecutionRoute::Sandbox => Some(true),
+        ExecutionRoute::Local | ExecutionRoute::Ssh | ExecutionRoute::Node => host_is_root,
+    }
+}
+
 async fn load_coordination_state(
     state_store: Option<&Arc<SessionStateStore>>,
     session_key: &str,
@@ -4853,17 +4867,9 @@ impl ChatService for LiveChatService {
                 "backend": null,
             })
         };
-        let sandbox_enabled = sandbox_info
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let host_is_root = detect_host_root_user().await;
-        // Sandbox containers currently run as root by default.
-        let exec_is_root = if sandbox_enabled {
-            Some(true)
-        } else {
-            host_is_root
-        };
+        let exec_mode = execution_mode_for_route(execution_route);
+        let exec_is_root = execution_root_for_route(execution_route, host_is_root);
         let exec_prompt_symbol = exec_is_root.map(|is_root| {
             if is_root {
                 "#"
@@ -4872,7 +4878,7 @@ impl ChatService for LiveChatService {
             }
         });
         let execution_info = serde_json::json!({
-            "mode": if sandbox_enabled { "sandbox" } else { "host" },
+            "mode": exec_mode,
             "route": execution_route.as_str(),
             "hostIsRoot": host_is_root,
             "isRoot": exec_is_root,
@@ -9449,6 +9455,7 @@ mod tests {
             preview: None,
             agent_id: None,
             node_id: None,
+            external_agent_source: None,
             version: 0,
         }
     }
@@ -9571,6 +9578,31 @@ mod tests {
         );
         assert_eq!(prompt_sandbox_no_network_state("none", true), None);
         assert_eq!(prompt_sandbox_no_network_state("unknown", false), None);
+    }
+
+    #[test]
+    fn execution_mode_for_route_prefers_resolved_route() {
+        assert_eq!(execution_mode_for_route(ExecutionRoute::Local), "host");
+        assert_eq!(execution_mode_for_route(ExecutionRoute::Sandbox), "sandbox");
+        assert_eq!(execution_mode_for_route(ExecutionRoute::Ssh), "host");
+        assert_eq!(execution_mode_for_route(ExecutionRoute::Node), "host");
+    }
+
+    #[test]
+    fn execution_root_for_route_uses_route_specific_defaults() {
+        assert_eq!(
+            execution_root_for_route(ExecutionRoute::Sandbox, Some(false)),
+            Some(true)
+        );
+        assert_eq!(
+            execution_root_for_route(ExecutionRoute::Local, Some(false)),
+            Some(false)
+        );
+        assert_eq!(
+            execution_root_for_route(ExecutionRoute::Ssh, Some(true)),
+            Some(true)
+        );
+        assert_eq!(execution_root_for_route(ExecutionRoute::Node, None), None);
     }
 
     #[test]

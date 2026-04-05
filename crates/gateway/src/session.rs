@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, Weak};
 
 use {
     async_trait::async_trait,
@@ -60,15 +60,6 @@ impl ExecutionRoute {
             Self::Sandbox => "sandbox",
             Self::Ssh => "ssh",
             Self::Node => "node",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Local => "Local host",
-            Self::Sandbox => "Sandbox",
-            Self::Ssh => "SSH target",
-            Self::Node => "Paired node",
         }
     }
 }
@@ -914,6 +905,7 @@ pub struct LiveSessionService {
     hook_registry: Option<Arc<HookRegistry>>,
     state_store: Option<Arc<SessionStateStore>>,
     browser_service: Option<Arc<dyn crate::services::BrowserService>>,
+    gateway_state: RwLock<Option<Weak<crate::state::GatewayState>>>,
 }
 
 impl LiveSessionService {
@@ -929,6 +921,7 @@ impl LiveSessionService {
             hook_registry: None,
             state_store: None,
             browser_service: None,
+            gateway_state: RwLock::new(None),
         }
     }
 
@@ -973,6 +966,21 @@ impl LiveSessionService {
     ) -> Self {
         self.browser_service = Some(browser);
         self
+    }
+
+    pub fn set_gateway_state(&self, state: Weak<crate::state::GatewayState>) {
+        *self
+            .gateway_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(state);
+    }
+
+    fn gateway_state(&self) -> Option<Arc<crate::state::GatewayState>> {
+        self.gateway_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     async fn default_agent_id(&self) -> String {
@@ -1233,64 +1241,32 @@ impl LiveSessionService {
             .collect()
     }
 
-    fn machine_payload(
+    async fn machine_payload(&self, route: ExecutionRoute, entry: &SessionEntry) -> Value {
+        self.machine_payload_with_inventory(route, entry, None)
+            .await
+    }
+
+    async fn machine_payload_with_inventory(
+        &self,
         route: ExecutionRoute,
         entry: &SessionEntry,
-        sandbox_available: bool,
+        inventory: Option<&crate::machine::MachineInventorySnapshot>,
     ) -> Value {
-        let (id, kind, trust_state, health, available) = match route {
-            ExecutionRoute::Local => ("local".to_string(), "local", "trusted_local", "ready", true),
-            ExecutionRoute::Sandbox => (
-                "sandbox".to_string(),
-                "sandbox",
-                "sandboxed",
-                if sandbox_available {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                sandbox_available,
-            ),
-            ExecutionRoute::Ssh => (
-                entry
-                    .node_id
-                    .clone()
-                    .unwrap_or_else(|| "ssh:unresolved".to_string()),
-                "ssh",
-                "managed_ssh",
-                if entry.node_id.is_some() {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                entry.node_id.is_some(),
-            ),
-            ExecutionRoute::Node => (
-                entry
-                    .node_id
-                    .clone()
-                    .unwrap_or_else(|| "node:unresolved".to_string()),
-                "node",
-                "paired_node",
-                if entry.node_id.is_some() {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                entry.node_id.is_some(),
-            ),
+        let sandbox_active = route == ExecutionRoute::Sandbox;
+        let machine = if let Some(inventory) = inventory {
+            crate::machine::live_session_machine_descriptor_for_inventory(
+                inventory,
+                entry,
+                sandbox_active,
+            )
+        } else if let Some(state) = self.gateway_state() {
+            crate::machine::live_session_machine_descriptor(&state, entry, sandbox_active).await
+        } else {
+            let sandbox_available =
+                crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
+            crate::machine::session_machine_descriptor(entry, sandbox_active, sandbox_available)
         };
-        serde_json::json!({
-            "id": id,
-            "kind": kind,
-            "route": route.as_str(),
-            "executionRoute": route.as_str(),
-            "label": route.label(),
-            "nodeId": entry.node_id,
-            "trustState": trust_state,
-            "health": health,
-            "available": available,
-        })
+        serde_json::to_value(machine).unwrap_or(Value::Null)
     }
 
     async fn present_session_entry(
@@ -1299,11 +1275,10 @@ impl LiveSessionService {
         preview: Option<&str>,
         active_channel: bool,
         agent_id: Option<String>,
+        inventory: Option<&crate::machine::MachineInventorySnapshot>,
     ) -> Value {
         let surface = infer_session_surface(entry);
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available =
-            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
         let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
         let external_source = normalize_session_source(entry.external_agent_source);
 
@@ -1335,7 +1310,9 @@ impl LiveSessionService {
             "surface": surface.surface,
             "sessionKind": surface.session_kind.as_str(),
             "executionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "machine": self
+                .machine_payload_with_inventory(execution_route, entry, inventory)
+                .await,
             "externalAgentSource": external_source.as_str(),
             "version": entry.version,
         })
@@ -1406,16 +1383,13 @@ impl LiveSessionService {
 
         let approval_mode = moltis_config::discover_and_load().tools.exec.approval_mode;
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available =
-            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
-
         serde_json::json!({
             "workspaceId": entry.project_id,
             "workspaceLabel": self.workspace_label(entry.project_id.as_deref()).await,
             "linkedProject": linked_project,
             "currentBranch": entry.worktree_branch,
             "currentExecutionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "machine": self.machine_payload(execution_route, entry).await,
             "approvalMode": approval_mode,
             "coordination": Self::coordination_payload(&coordination),
             "memorySummary": coordination.durable_notes,
@@ -1433,6 +1407,11 @@ impl LiveSessionService {
 impl SessionService for LiveSessionService {
     async fn list(&self) -> ServiceResult {
         let all = self.metadata.list().await;
+        let machine_inventory = if let Some(state) = self.gateway_state() {
+            Some(crate::machine::machine_inventory_snapshot(&state).await)
+        } else {
+            None
+        };
 
         let mut entries: Vec<Value> = Vec::with_capacity(all.len());
         for mut e in all {
@@ -1477,8 +1456,14 @@ impl SessionService for LiveSessionService {
                 .map(|p| truncate_preview(p, SESSION_PREVIEW_MAX_CHARS));
 
             entries.push(
-                self.present_session_entry(&e, preview.as_deref(), active_channel, Some(agent_id))
-                    .await,
+                self.present_session_entry(
+                    &e,
+                    preview.as_deref(),
+                    active_channel,
+                    Some(agent_id),
+                    machine_inventory.as_ref(),
+                )
+                .await,
             );
         }
         Ok(serde_json::json!(entries))
@@ -1540,6 +1525,7 @@ impl SessionService for LiveSessionService {
                         entry.preview.as_deref(),
                         self.is_active_channel_session(&entry).await,
                         entry.agent_id.clone(),
+                        None,
                     )
                     .await,
                 "history": [],
@@ -1580,6 +1566,7 @@ impl SessionService for LiveSessionService {
                     entry.preview.as_deref(),
                     self.is_active_channel_session(&entry).await,
                     entry.agent_id.clone(),
+                    None,
                 )
                 .await,
             "history": history,
@@ -1688,6 +1675,7 @@ impl SessionService for LiveSessionService {
                 entry.preview.as_deref(),
                 self.is_active_channel_session(&entry).await,
                 entry.agent_id.clone(),
+                None,
             )
             .await)
     }
@@ -2306,6 +2294,7 @@ impl SessionService for LiveSessionService {
                 final_entry.preview.as_deref(),
                 self.is_active_channel_session(&final_entry).await,
                 final_entry.agent_id.clone(),
+                None,
             )
             .await;
         if let Some(obj) = payload.as_object_mut() {
