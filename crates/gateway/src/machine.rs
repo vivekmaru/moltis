@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use {moltis_tools::sandbox::SandboxRouter, serde::Serialize};
+use {
+    moltis_sessions::metadata::SessionEntry, moltis_tools::sandbox::SandboxRouter, serde::Serialize,
+};
 
 use crate::{
     auth::{SshAuthMode, SshTargetEntry},
@@ -370,9 +372,68 @@ pub fn session_binding_from_machine_id(
     }
 }
 
+#[must_use]
+pub fn session_machine_kind(entry: &SessionEntry, sandbox_active: bool) -> MachineKind {
+    if let Some(node_id) = entry.node_id.as_deref() {
+        return if node_id.starts_with("ssh:") {
+            MachineKind::Ssh
+        } else {
+            MachineKind::Node
+        };
+    }
+
+    if sandbox_active {
+        MachineKind::Sandbox
+    } else {
+        MachineKind::Local
+    }
+}
+
+#[must_use]
+pub fn session_machine_descriptor(
+    entry: &SessionEntry,
+    sandbox_active: bool,
+    sandbox_available: bool,
+) -> MachineDescriptor {
+    match session_machine_kind(entry, sandbox_active) {
+        MachineKind::Local => MachineDescriptor::local(),
+        MachineKind::Sandbox => MachineDescriptor::sandbox(sandbox_available),
+        kind => {
+            MachineDescriptor::session_binding(kind, entry.node_id.as_deref(), sandbox_available)
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, moltis_sessions::metadata::SessionEntry};
+
+    fn session_entry(key: &str) -> SessionEntry {
+        SessionEntry {
+            id: key.to_string(),
+            key: key.to_string(),
+            label: None,
+            model: None,
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            last_seen_message_count: 0,
+            project_id: None,
+            archived: false,
+            worktree_branch: None,
+            sandbox_enabled: None,
+            sandbox_image: None,
+            channel_binding: None,
+            parent_session_key: None,
+            fork_point: None,
+            mcp_disabled: None,
+            preview: None,
+            agent_id: None,
+            node_id: None,
+            external_agent_source: None,
+            version: 1,
+        }
+    }
 
     #[test]
     fn session_binding_uses_stable_local_and_sandbox_ids() {
@@ -443,5 +504,25 @@ mod tests {
         assert_eq!(machine.health, MachineHealth::Ready);
         assert_eq!(machine.host_pinned, Some(true));
         assert_eq!(machine.commands, vec!["ssh-managed".to_string()]);
+    }
+
+    #[test]
+    fn session_machine_descriptor_prefers_normalized_route_over_legacy_flags() {
+        let mut entry = session_entry("main");
+        entry.sandbox_enabled = Some(true);
+        let machine = session_machine_descriptor(&entry, false, false);
+        assert_eq!(machine.kind, MachineKind::Local);
+        assert!(machine.available);
+        assert_eq!(machine.execution_route, "local");
+    }
+
+    #[test]
+    fn session_machine_descriptor_keeps_ssh_identity() {
+        let mut entry = session_entry("main");
+        entry.node_id = Some("ssh:target:42".to_string());
+        let machine = session_machine_descriptor(&entry, false, true);
+        assert_eq!(machine.kind, MachineKind::Ssh);
+        assert_eq!(machine.id, "ssh:target:42");
+        assert_eq!(machine.execution_route, "ssh");
     }
 }

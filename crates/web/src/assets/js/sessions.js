@@ -617,7 +617,13 @@ function restoreSessionState(entry, projectId) {
 	S.setSessionExecPromptSymbol(effectiveSandboxRoute || S.hostExecIsRoot ? "#" : "$");
 	updateCommandInputUI();
 	restoreMcpToggle(!entry.mcpDisabled);
-	restoreMachineSelection(entry.machine?.id || entry.node_id || (entry.sandbox_enabled === true ? "sandbox" : "local"));
+	var restoredMachineId =
+		entry.machine?.id ||
+		(entry.executionRoute === "sandbox" ? "sandbox" : null) ||
+		(entry.executionRoute === "local" ? "local" : null) ||
+		entry.node_id ||
+		(entry.sandbox_enabled === true ? "sandbox" : "local");
+	restoreMachineSelection(restoredMachineId);
 	updateChatSessionHeader();
 }
 

@@ -751,4 +751,79 @@ test.describe("Session management", () => {
 
 		expect(pageErrors).toEqual([]);
 	});
+
+	test("session switch restores local machine from normalized execution route", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const [sessionsModule, machineStoreModule, stateModule] = await Promise.all([
+				import(`${prefix}js/sessions.js`),
+				import(`${prefix}js/stores/machine-store.js`),
+				import(`${prefix}js/state.js`),
+			]);
+
+			machineStoreModule.setAll([
+				{ id: "local", label: "Local host", kind: "local", available: true, health: "ready" },
+				{ id: "sandbox", label: "Sandbox", kind: "sandbox", available: true, health: "ready" },
+			]);
+			machineStoreModule.select("sandbox");
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			if (!window.__origSessionsSwitchSend) {
+				window.__origSessionsSwitchSend = stateModule.ws.send.bind(stateModule.ws);
+			}
+
+			stateModule.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (parsed?.method === "sessions.switch" && parsed?.params?.key === "main") {
+					const responder = stateModule.pending[parsed.id];
+					if (responder) {
+						responder({
+							ok: true,
+							payload: {
+								entry: {
+									key: "main",
+									label: "Main",
+									projectId: null,
+									sandbox_enabled: true,
+									sandbox_image: null,
+									worktree_branch: "",
+									mcpDisabled: false,
+									agent_id: "main",
+									agentId: "main",
+									node_id: null,
+									executionRoute: "local",
+									machine: null,
+									version: 1,
+								},
+								historyCacheHit: true,
+								history: [],
+							},
+						});
+						delete stateModule.pending[parsed.id];
+					}
+					return undefined;
+				}
+				return window.__origSessionsSwitchSend(payload);
+			};
+
+			sessionsModule.switchSession("main");
+		});
+
+		await expect(page.locator("#nodeComboLabel")).toHaveText("Local host");
+		expect(pageErrors).toEqual([]);
+	});
 });
