@@ -1185,6 +1185,7 @@ fn machine_payload(
     route: ExecutionRoute,
     session_entry: Option<&SessionEntry>,
     sandbox_available: bool,
+    connected_node_ids: Option<&HashSet<String>>,
 ) -> Value {
     let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
     match route {
@@ -1229,8 +1230,15 @@ fn machine_payload(
             "label": "Paired node",
             "nodeId": node_id,
             "trustState": "paired_node",
-            "health": if node_id.is_some() { "ready" } else { "unavailable" },
-            "available": node_id.is_some(),
+            "health": if node_id
+                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id)))
+            {
+                "ready"
+            } else {
+                "unavailable"
+            },
+            "available": node_id
+                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id))),
         }),
     }
 }
@@ -1247,13 +1255,25 @@ fn sandbox_machine_available(state: &Arc<dyn ChatRuntime>) -> bool {
         .is_some_and(|router| router.backend().is_real())
 }
 
-async fn resolve_execution_context(
+async fn resolve_execution_context_with_connected_nodes(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     session_entry: Option<&SessionEntry>,
+    connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> ResolvedExecutionContext {
     let route = effective_execution_route(state, session_key, session_entry).await;
-    let machine = machine_payload(route, session_entry, sandbox_machine_available(state));
+    let connected_node_ids = connected_nodes.map(|nodes| {
+        nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>()
+    });
+    let machine = machine_payload(
+        route,
+        session_entry,
+        sandbox_machine_available(state),
+        connected_node_ids.as_ref(),
+    );
     ResolvedExecutionContext { route, machine }
 }
 
@@ -1399,7 +1419,14 @@ async fn build_prompt_runtime_context(
         .as_ref()
         .map(|loc| loc.to_string());
     let channel_context = resolve_channel_runtime_context(session_key, session_entry);
-    let execution_context = resolve_execution_context(state, session_key, session_entry).await;
+    let connected = state.connected_nodes().await;
+    let execution_context = resolve_execution_context_with_connected_nodes(
+        state,
+        session_key,
+        session_entry,
+        Some(&connected),
+    )
+    .await;
     let workspace = session_entry.and_then(|entry| entry.project_id.clone());
     let external_agent_source = normalize_external_agent_source(
         session_entry.and_then(|entry| entry.external_agent_source),
@@ -1433,7 +1460,6 @@ async fn build_prompt_runtime_context(
     refresh_runtime_prompt_time(&mut host_ctx);
 
     // Build nodes context from connected remote nodes.
-    let connected = state.connected_nodes().await;
     let nodes_ctx = if connected.is_empty() {
         None
     } else {
@@ -4720,8 +4746,14 @@ impl ChatService for LiveChatService {
                 )
             }
         };
-        let execution_context =
-            resolve_execution_context(&self.state, &session_key, session_entry.as_ref()).await;
+        let connected_nodes = self.state.connected_nodes().await;
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &self.state,
+            &session_key,
+            session_entry.as_ref(),
+            Some(&connected_nodes),
+        )
+        .await;
         let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
         let external_agent_source = normalize_external_agent_source(
             session_entry
@@ -9159,6 +9191,7 @@ mod tests {
         channel_status_log: Mutex<HashMap<String, Vec<String>>>,
         channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
         channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
+        connected_nodes: Vec<runtime::ConnectedNodeSummary>,
         tts: moltis_service_traits::NoopTtsService,
         project: moltis_service_traits::NoopProjectService,
         mcp: moltis_service_traits::NoopMcpService,
@@ -9171,6 +9204,7 @@ mod tests {
                 channel_status_log: Mutex::new(HashMap::new()),
                 channel_outbound: None,
                 channel_stream_outbound: None,
+                connected_nodes: Vec::new(),
                 tts: moltis_service_traits::NoopTtsService,
                 project: moltis_service_traits::NoopProjectService,
                 mcp: moltis_service_traits::NoopMcpService,
@@ -9190,6 +9224,11 @@ mod tests {
             outbound: Arc<dyn moltis_channels::ChannelStreamOutbound>,
         ) -> Self {
             self.channel_stream_outbound = Some(outbound);
+            self
+        }
+
+        fn with_connected_nodes(mut self, nodes: Vec<runtime::ConnectedNodeSummary>) -> Self {
+            self.connected_nodes = nodes;
             self
         }
     }
@@ -9330,7 +9369,7 @@ mod tests {
         }
 
         async fn connected_nodes(&self) -> Vec<runtime::ConnectedNodeSummary> {
-            Vec::new()
+            self.connected_nodes.clone()
         }
     }
 
@@ -9674,7 +9713,13 @@ mod tests {
         let mut entry = make_session_entry_with_binding(None);
         entry.sandbox_enabled = Some(true);
 
-        let resolved = resolve_execution_context(&runtime, &entry.key, Some(&entry)).await;
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            None,
+        )
+        .await;
         assert_eq!(resolved.route, ExecutionRoute::Sandbox);
         assert_eq!(resolved.machine["executionRoute"], "sandbox");
         assert_eq!(resolved.machine["available"], false);
@@ -9687,11 +9732,79 @@ mod tests {
         let mut entry = make_session_entry_with_binding(None);
         entry.node_id = Some("ssh:target:42".to_string());
 
-        let resolved = resolve_execution_context(&runtime, &entry.key, Some(&entry)).await;
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            None,
+        )
+        .await;
         assert_eq!(resolved.route, ExecutionRoute::Ssh);
         assert_eq!(resolved.machine["id"], "ssh:target:42");
         assert_eq!(resolved.machine["executionRoute"], "ssh");
         assert_eq!(resolved.machine["kind"], "ssh");
+    }
+
+    fn connected_node_summary(node_id: &str) -> runtime::ConnectedNodeSummary {
+        runtime::ConnectedNodeSummary {
+            node_id: node_id.to_string(),
+            display_name: Some(node_id.to_string()),
+            platform: "linux".to_string(),
+            capabilities: Vec::new(),
+            cpu_count: None,
+            cpu_usage: None,
+            mem_total: None,
+            mem_available: None,
+            telemetry_stale: false,
+            disk_total: None,
+            disk_available: None,
+            runtimes: Vec::new(),
+            providers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_marks_disconnected_node_unavailable() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:missing".to_string());
+
+        let connected_nodes = vec![connected_node_summary("node:other")];
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.route, ExecutionRoute::Node);
+        assert_eq!(resolved.machine["id"], "node:missing");
+        assert_eq!(resolved.machine["available"], false);
+        assert_eq!(resolved.machine["health"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_marks_connected_node_ready() {
+        let runtime = Arc::new(
+            MockChatRuntime::new().with_connected_nodes(vec![connected_node_summary("node:ready")]),
+        ) as Arc<dyn ChatRuntime>;
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:ready".to_string());
+
+        let connected_nodes = runtime.connected_nodes().await;
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.route, ExecutionRoute::Node);
+        assert_eq!(resolved.machine["id"], "node:ready");
+        assert_eq!(resolved.machine["available"], true);
+        assert_eq!(resolved.machine["health"], "ready");
     }
 
     #[test]

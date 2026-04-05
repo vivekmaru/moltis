@@ -17,6 +17,12 @@ Follow-up on the same branch:
 - moved `recentSessions` payload construction onto a small summary helper to avoid another ad hoc route/source assembly path
 - added focused tests for paired-node default routing and recent-session summary normalization
 
+Third slice on the same branch:
+
+- wired prompt runtime and `chat.context()` through the connected-node-aware execution resolver
+- stopped chat-side node machine payloads from reporting disconnected paired nodes as ready
+- added focused tests for connected vs disconnected paired-node availability
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -27,3 +33,5 @@ Follow-up on the same branch:
 - `cargo check -p moltis-chat`
 - `cargo test -p moltis-chat default_connected_node_id_only_uses_paired_node_route`
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_source_and_route`
+- `cargo test -p moltis-chat resolve_execution_context_marks_disconnected_node_unavailable`
+- `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
