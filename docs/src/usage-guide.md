@@ -162,6 +162,18 @@ at the workspace level. That is the intended default for repeat operator flows
 like a home server workspace that should keep landing on the same SSH target or
 paired node.
 
+The workspace overview is now the primary operator view for execution routing.
+It shows:
+
+- the current machine posture
+- trust state and health
+- approval mode and route guardrails
+- available machines, including which one is current and which one is the
+  workspace default
+
+That gives you a place to audit where commands will run before you change the
+session machine or start issuing operator tasks.
+
 ### Share access safely
 
 - Use session cookies for browsers

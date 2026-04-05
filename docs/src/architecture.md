@@ -188,6 +188,18 @@ into one mutable session-only setting. A workspace can remember "this codebase
 normally runs on the sandbox" or "this server workspace normally lands on this
 SSH target" while the current session still exposes its live route separately.
 
+The primary operator-facing surface for that model is the workspace overview in
+the chat controls. It combines:
+
+- current machine posture
+- trust and health metadata
+- approval mode
+- available machine inventory
+- workspace preference vs current route
+
+That is intended to make execution routing legible before a tool call, rather
+than forcing the user to infer risk from a compact selector or a raw node id.
+
 ## Where To Go Next
 
 - [Usage Guide](usage-guide.md) for the day-to-day operator workflow

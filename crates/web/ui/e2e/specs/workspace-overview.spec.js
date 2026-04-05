@@ -71,25 +71,95 @@ test.describe("Workspace overview", () => {
 					},
 				},
 			};
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					platform: "local",
+					nodeId: null,
+					remoteIp: null,
+					hostPinned: null,
+					telemetryStale: null,
+					capabilities: ["system.run"],
+					commands: ["system.run"],
+				},
+				{
+					id: "sandbox",
+					kind: "sandbox",
+					label: "Sandbox",
+					executionRoute: "sandbox",
+					route: "sandbox",
+					trustState: "sandboxed",
+					health: "ready",
+					available: true,
+					platform: "sandbox",
+					nodeId: null,
+					remoteIp: null,
+					hostPinned: null,
+					telemetryStale: null,
+					capabilities: ["system.run"],
+					commands: ["system.run"],
+				},
+				{
+					id: "node-build",
+					kind: "node",
+					label: "Build box",
+					executionRoute: "node",
+					route: "node",
+					trustState: "paired_node",
+					health: "degraded",
+					available: true,
+					platform: "linux",
+					nodeId: "node-build",
+					remoteIp: "10.0.0.5",
+					hostPinned: null,
+					telemetryStale: true,
+					capabilities: ["system.run", "files.read"],
+					commands: ["system.run"],
+				},
+			];
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+			function rpcResponsePayload(parsed) {
+				if (parsed?.method === "sessions.workspace_overview" && parsed?.params?.key === sessionKey) {
+					return overviewPayload;
+				}
+				if (parsed?.method === "machines.list") {
+					return machinesPayload;
+				}
+				return undefined;
+			}
+			function resolvePendingRpc(parsed, payload) {
+				const responsePayload = rpcResponsePayload(parsed);
+				if (responsePayload === undefined) {
+					return window.__workspaceOverviewOrigSend(payload);
+				}
+				const responder = state.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete state.pending[parsed.id];
+				}
+				return undefined;
+			}
 
 			if (!window.__workspaceOverviewOrigSend) {
 				window.__workspaceOverviewOrigSend = state.ws.send.bind(state.ws);
 			}
 			state.ws.send = (payload) => {
-				try {
-					const parsed = JSON.parse(payload);
-					if (parsed?.method === "sessions.workspace_overview" && parsed?.params?.key === sessionKey) {
-						const responder = state.pending[parsed.id];
-						if (responder) {
-							responder({ ok: true, payload: overviewPayload });
-							delete state.pending[parsed.id];
-						}
-						return;
-					}
-				} catch (_error) {
-					// Fall through to the original sender.
-				}
-				return window.__workspaceOverviewOrigSend(payload);
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__workspaceOverviewOrigSend(payload);
+				return resolvePendingRpc(parsed, payload);
 			};
 
 			sessionModule.upsert({
@@ -124,12 +194,20 @@ test.describe("Workspace overview", () => {
 				version: 2,
 			});
 			sessionModule.setActive(sessionKey);
+			sessionModule.notify();
 		});
 		await openChatMoreModal(page);
+		const chatMoreModal = page.locator("#chatMoreModal");
 
-		await expect(page.getByText("Workspace: E2E Workspace", { exact: true })).toBeVisible();
-		await expect(page.getByText("Route: Local", { exact: true })).toBeVisible();
-		await expect(page.getByText("Preferred machine: Sandbox", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Workspace: E2E Workspace", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Route: Local", { exact: true }).first()).toBeVisible();
+		await expect(chatMoreModal.getByText("Preferred machine: Sandbox", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Machine Posture", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Trust", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Trusted Local", { exact: true }).first()).toBeVisible();
+		await expect(chatMoreModal.getByText("Available Machines", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Build box", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Stale telemetry", { exact: true })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
 });
