@@ -55,11 +55,17 @@ pub struct PromptHostRuntimeContext {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub session_key: Option<String>,
+    /// Bound workspace/project identifier for this session.
+    pub workspace: Option<String>,
     /// Runtime surface the assistant is currently operating in
     /// (for example: "web", "telegram", "discord", "cron", "heartbeat").
     pub surface: Option<String>,
     /// High-level session kind (`web`, `channel`, `cron`).
     pub session_kind: Option<String>,
+    /// Effective execution route for command-oriented tools.
+    pub execution_route: Option<String>,
+    /// Where this session's attached external work primarily came from.
+    pub external_agent_source: Option<String>,
     /// Active channel type when running in a channel-bound session.
     pub channel_type: Option<String>,
     /// Active channel account identifier when running in a channel-bound session.
@@ -737,8 +743,14 @@ fn format_host_runtime_line(host: &PromptHostRuntimeContext) -> Option<String> {
         ("provider", host.provider.as_deref()),
         ("model", host.model.as_deref()),
         ("session", host.session_key.as_deref()),
+        ("workspace", host.workspace.as_deref()),
         ("surface", host.surface.as_deref()),
         ("session_kind", host.session_kind.as_deref()),
+        ("execution_route", host.execution_route.as_deref()),
+        (
+            "external_agent_source",
+            host.external_agent_source.as_deref(),
+        ),
         ("channel_type", host.channel_type.as_deref()),
         ("channel_account", host.channel_account_id.as_deref()),
         ("channel_chat_id", host.channel_chat_id.as_deref()),
@@ -1040,8 +1052,11 @@ mod tests {
                 provider: Some("openai".into()),
                 model: Some("gpt-5".into()),
                 session_key: Some("main".into()),
+                workspace: Some("proj-1".into()),
                 surface: None,
                 session_kind: None,
+                execution_route: Some("sandbox".into()),
+                external_agent_source: Some("codex".into()),
                 channel_type: None,
                 channel_account_id: None,
                 channel_chat_id: None,
@@ -1093,6 +1108,9 @@ mod tests {
         assert!(!prompt.contains("The current user datetime is"));
         assert!(prompt.contains("provider=openai"));
         assert!(prompt.contains("model=gpt-5"));
+        assert!(prompt.contains("workspace=proj-1"));
+        assert!(prompt.contains("execution_route=sandbox"));
+        assert!(prompt.contains("external_agent_source=codex"));
         assert!(prompt.contains("data_dir=/home/moltis/.moltis"));
         assert!(prompt.contains("sudo_non_interactive=true"));
         assert!(prompt.contains("sudo_status=passwordless"));

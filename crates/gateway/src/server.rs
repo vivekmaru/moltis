@@ -1823,6 +1823,11 @@ pub async fn prepare_gateway_core(
                         .set_project_id(&entry.key, entry.project_id.clone())
                         .await;
                 }
+                if entry.external_agent_source.is_some() {
+                    let _ = sqlite_meta
+                        .set_external_agent_source(&entry.key, entry.external_agent_source)
+                        .await;
+                }
             }
         }
         let bak = metadata_json_path.with_extension("json.bak");
@@ -3705,7 +3710,8 @@ pub async fn prepare_gateway_core(
             Arc::clone(&session_metadata),
         )
         .with_tools(Arc::clone(&shared_tool_registry))
-        .with_failover(config.failover.clone());
+        .with_failover(config.failover.clone())
+        .with_state_store(Arc::clone(&session_state_store));
 
         if let Some(ref hooks) = state.inner.read().await.hook_registry {
             chat_service = chat_service.with_hooks_arc(Arc::clone(hooks));

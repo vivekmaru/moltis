@@ -1092,6 +1092,85 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         }),
     );
     reg.register(
+        "sessions.workspace_overview",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .session
+                    .workspace_overview(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "sessions.coordination.set",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let key = ctx
+                    .params
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let result = ctx
+                    .state
+                    .services
+                    .session
+                    .coordination_set(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)?;
+                if !key.is_empty() {
+                    broadcast(
+                        &ctx.state,
+                        "session",
+                        serde_json::json!({
+                            "kind": "patched",
+                            "sessionKey": key,
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+                }
+                Ok(result)
+            })
+        }),
+    );
+    reg.register(
+        "sessions.external.attach",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let key = ctx
+                    .params
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let result = ctx
+                    .state
+                    .services
+                    .session
+                    .external_attach(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)?;
+                if !key.is_empty() {
+                    broadcast(
+                        &ctx.state,
+                        "session",
+                        serde_json::json!({
+                            "kind": "patched",
+                            "sessionKey": key,
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+                }
+                Ok(result)
+            })
+        }),
+    );
+    reg.register(
         "sessions.voice.generate",
         Box::new(|ctx| {
             Box::pin(async move {

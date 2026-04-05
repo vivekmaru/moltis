@@ -514,12 +514,16 @@ Migration guidance when changing host/domain:
 
 ### 1. Enable Authentication
 
-By default, Moltis requires a password when accessed from non-localhost:
+Keep normal authentication enabled in production:
 
 ```toml
 [auth]
 disabled = false  # keep this false in production
 ```
+
+On first boot, Moltis prints a setup code and expects you to create a password
+or passkey. After setup completes, the same auth gate applies on loopback and
+remote access.
 
 ### 2. Use Sandbox Isolation
 

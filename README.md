@@ -21,13 +21,13 @@ One binary — sandboxed, secure, yours.
 
 Moltis recently hit [the front page of Hacker News](https://news.ycombinator.com/item?id=46993587). Please [open an issue](https://github.com/moltis-org/moltis/issues) for any friction at all. I'm focused on making Moltis excellent.
 
-**Secure by design** — Your keys never leave your machine. Every command runs in a sandboxed container, never on your host.
+**Secure by design** — Your keys stay under your control. By default, command execution is sandboxed, and Moltis makes execution routing explicit when you choose local, SSH, or paired-node backends.
 
 **Your hardware** — Runs on a Mac Mini, a Raspberry Pi, or any server you own. One Rust binary, no Node.js, no npm, no runtime.
 
 **Full-featured** — Voice, memory, cross-session recall, automatic edit checkpoints, scheduling, Telegram, Discord, browser automation, MCP servers, SSH or node-backed remote exec, managed deploy keys with host pinning in the web UI, a live Settings → Tools inventory, Cursor-compatible project context, and context-file threat scanning — all built-in. No plugin marketplace to get supply-chain attacked through.
 
-**Auditable** — The agent loop + provider model fits in ~5K lines. The core (excluding the optional web UI) is ~196K lines across 46 modular crates you can audit independently, with 3,100+ tests and zero `unsafe` code\*.
+**Auditable** — The agent loop + provider model fits in ~5K lines. The system is split across modular Rust crates so the gateway, auth, providers, tools, and storage layers can be audited independently.
 
 ## Installation
 
@@ -54,7 +54,7 @@ cargo install moltis --git https://github.com/moltis-org/moltis
 | Full codebase | — | — | — | 1,000+ tests | **~124K LoC** (2,300+ tests) |
 | Runtime | Node.js + npm | Single binary | Node.js | Single binary (3.4 MB) | **Single binary (44 MB)** |
 | Sandbox | App-level | — | Docker | Docker | **Docker + Apple Container** |
-| Memory safety | GC | GC | GC | Ownership | **Ownership, zero `unsafe`\*** |
+| Memory safety | GC | GC | GC | Ownership | **Ownership, small isolated FFI surface\*** |
 | Auth | Basic | API keys | None | Token + OAuth | **Password + Passkey + API keys + Vault** |
 | Voice I/O | Plugin | — | — | — | **Built-in (15+ providers)** |
 | MCP | Yes | — | — | — | **Yes (stdio + HTTP/SSE)** |
@@ -62,7 +62,7 @@ cargo install moltis --git https://github.com/moltis-org/moltis
 | Skills | Yes (store) | Yes | Yes | Yes | **Yes (+ OpenClaw Store)** |
 | Memory/RAG | Plugin | — | Per-group | SQLite + FTS | **SQLite + FTS + vector** |
 
-\* `unsafe` is denied workspace-wide. The only exceptions are opt-in FFI wrappers behind the `local-embeddings` feature flag, not part of the core.
+\* The main gateway path is Rust-first. Limited `unsafe` exists in isolated FFI and bridge code paths rather than the core request/auth/tooling flow.
 
 > [Full comparison with benchmarks →](https://docs.moltis.org/comparison.html)
 
@@ -109,8 +109,8 @@ Use `--no-default-features --features lightweight` for constrained devices (Rasp
 
 ## Security
 
-- **Zero `unsafe` code\*** — denied workspace-wide; only opt-in FFI behind `local-embeddings` flag
-- **Sandboxed execution** — Docker + Apple Container, per-session isolation
+- **Rust-first core** — safety-critical gateway/auth/tooling paths stay in Rust with small isolated FFI boundaries
+- **Sandboxed execution by default** — Docker + Apple Container, per-session isolation
 - **Secret handling** — `secrecy::Secret`, zeroed on drop, redacted from tool output
 - **Authentication** — password + passkey (WebAuthn), rate-limited, per-IP throttle
 - **SSRF protection** — DNS-resolved, blocks loopback/private/link-local
@@ -193,8 +193,9 @@ just build-release-with-wasm    # Builds WASM artifacts + release binary
 cargo run --release --bin moltis
 ```
 
-Open `https://moltis.localhost:3000`. On first run, a setup code is printed to
-the terminal — enter it in the web UI to set your password or register a passkey.
+Open the URL shown in the terminal. On first run, Moltis prints both the
+browser URL and a setup code. Enter the code in the web UI to create your
+password or register a passkey before adding providers and starting a session.
 
 Optional flags: `--config-dir /path/to/config --data-dir /path/to/data`
 

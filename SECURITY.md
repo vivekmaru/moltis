@@ -25,6 +25,10 @@ This policy applies to the Moltis codebase. Third-party dependencies should be r
 
 Security updates are provided for the latest release only.
 
+For the current artifact verification flow, including the dual-signing model
+(Sigstore from CI plus maintainer GPG signatures), see
+[docs/src/release-verification.md](docs/src/release-verification.md).
+
 ## Verifying Release Signatures
 
 All release artifacts are signed using [Sigstore](https://sigstore.dev) keyless
@@ -49,18 +53,21 @@ Each release artifact has three companion files:
 - `.crt` — Signing certificate
 
 ```bash
-# Download the artifact and its signature files
-curl -LO https://github.com/moltis-org/moltis/releases/download/v0.1.0/moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/moltis-org/moltis/releases/download/v0.1.0/moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sig
-curl -LO https://github.com/moltis-org/moltis/releases/download/v0.1.0/moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz.crt
+# Prefer the helper script when available
+./scripts/verify-release.sh --version VERSION
+
+# Or download one artifact and its signature files manually
+curl -LO https://github.com/moltis-org/moltis/releases/download/VERSION/moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/moltis-org/moltis/releases/download/VERSION/moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.sig
+curl -LO https://github.com/moltis-org/moltis/releases/download/VERSION/moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.crt
 
 # Verify the signature
 cosign verify-blob \
-  --signature moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sig \
-  --certificate moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz.crt \
+  --signature moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.sig \
+  --certificate moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.crt \
   --certificate-identity-regexp="https://github.com/moltis-org/moltis/*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-  moltis-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+  moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz
 
 # Expected output: Verified OK
 ```
@@ -151,14 +158,11 @@ git config --global commit.gpgsign true
 ### Verifying your setup
 
 ```bash
-# Make a test commit
-echo "test" >> test.txt && git add test.txt && git commit -m "test signed commit"
+# Make a small test commit in a throwaway branch or repository
+git commit --allow-empty -m "test signed commit"
 
 # Verify it's signed
 git log --show-signature -1
-
-# Clean up
-git reset --hard HEAD~1
 ```
 
 ### Troubleshooting

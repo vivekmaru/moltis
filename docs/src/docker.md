@@ -55,7 +55,8 @@ After trusting the CA, restart your browser. The warning will not appear again
 (the CA persists in the mounted config volume).
 
 ```admonish note
-When accessing from localhost, no authentication is required. If you access Moltis from a different machine (e.g., over the network), a setup code is printed to the container logs for authentication setup:
+On first boot, Moltis prints a setup code to the container logs. Use that code
+to finish password or passkey setup in the browser:
 
 ~~~bash
 docker logs moltis
@@ -363,7 +364,8 @@ docker exec moltis ls -la /var/run/docker.sock
 
 ### Setup code not appearing in logs (for network access)
 
-The setup code only appears when accessing from a non-localhost address. If you're accessing from the same machine via `localhost`, no setup code is needed. For network access, wait a few seconds for the gateway to start, then check logs:
+On first boot, the setup code is printed during startup. If you missed it, wait
+a few seconds for the gateway to start, then check logs:
 
 ```bash
 docker logs moltis 2>&1 | grep -i setup

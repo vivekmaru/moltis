@@ -18,6 +18,362 @@ import {
 import { sessionStore } from "../stores/session-store.js";
 import { ComboSelect, confirmDialog, shareLinkDialog, shareVisibilityDialog, showToast } from "../ui.js";
 
+function executionRouteLabel(route) {
+	switch (route) {
+		case "sandbox":
+			return "Sandbox";
+		case "ssh":
+			return "SSH";
+		case "node":
+			return "Node";
+		default:
+			return "Local";
+	}
+}
+
+function externalSourceLabel(source) {
+	switch (source) {
+		case "claude_code":
+			return "Claude Code";
+		case "copilot":
+			return "Copilot";
+		case "api":
+			return "API";
+		case "imported":
+			return "Imported";
+		case "codex":
+			return "Codex";
+		default:
+			return "Native";
+	}
+}
+
+function buildAgentPickerState(agentOptions, agentSelectValue, defaultAgentId, switchingAgent, agentOptionsLoaded) {
+	var hasCurrentAgentOption = agentOptions.some((agent) => agent.id === agentSelectValue);
+	var options = agentOptions.map((agent) => {
+		var prefix = agent.emoji ? `${agent.emoji} ` : "";
+		var suffix = agent.id === defaultAgentId ? " (default)" : "";
+		return {
+			value: agent.id,
+			label: `${prefix}${agent.name}${suffix}`,
+		};
+	});
+	if (!hasCurrentAgentOption && agentSelectValue && (switchingAgent || agentOptionsLoaded)) {
+		options = [
+			{
+				value: agentSelectValue,
+				label: switchingAgent ? "Switching…" : `agent:${agentSelectValue}`,
+			},
+			...options,
+		];
+	}
+	return {
+		hasCurrentAgentOption,
+		options,
+		disabled: switchingAgent || options.length === 0,
+	};
+}
+
+function buildNodePickerState(nodeOptions, currentNodeId, switchingNode) {
+	var hasCurrentNodeOption = currentNodeId === "" || nodeOptions.some((node) => node.nodeId === currentNodeId);
+	var options = [
+		{ value: "", label: "Local" },
+		...nodeOptions.map((node) => ({
+			value: node.nodeId,
+			label: nodeOptionLabel(node),
+		})),
+	];
+	if (!hasCurrentNodeOption && currentNodeId) {
+		var fallbackLabel = currentNodeId.startsWith("ssh:") ? `SSH: ${currentNodeId.slice(4)}` : `node:${currentNodeId}`;
+		options = [
+			{
+				value: currentNodeId,
+				label: switchingNode ? "Switching…" : fallbackLabel,
+			},
+			...options,
+		];
+	}
+	return { hasCurrentNodeOption, options };
+}
+
+function renderSessionBadges(session, workspaceLabel, routeLabel, sourceLabel) {
+	if (!session) return null;
+	return html`
+		<div class="flex flex-wrap items-center gap-1.5">
+			${
+				workspaceLabel &&
+				html`<span class="text-[11px] rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--muted)]">
+					${workspaceLabel}
+				</span>`
+			}
+			<span class="text-[11px] rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--muted)]">
+				${routeLabel}
+			</span>
+			<span class="text-[11px] rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--muted)]">
+				${sourceLabel}
+			</span>
+		</div>
+	`;
+}
+
+function renderNameControl({
+	showName,
+	renaming,
+	inputRef,
+	renameInputStyle,
+	commitRename,
+	onKeyDown,
+	nameStyle,
+	canRename,
+	startRename,
+	displayName,
+}) {
+	if (!showName) return null;
+	if (renaming) {
+		return html`<input
+			ref=${inputRef}
+			class="chat-session-rename-input"
+			style=${renameInputStyle}
+			onBlur=${commitRename}
+			onKeyDown=${onKeyDown}
+		/>`;
+	}
+	return html`<span
+		class="chat-session-name"
+		style=${nameStyle}
+		title=${canRename ? "Click to rename" : ""}
+		onClick=${startRename}
+	>${displayName}</span>`;
+}
+
+function renderRenameButton(showName, showRenameButton, canRename, renaming, actionButtonClass, startRename) {
+	if (!(showName && showRenameButton && canRename && !renaming)) return null;
+	return html`<button class=${actionButtonClass} onClick=${startRename} title="Rename session">Rename</button>`;
+}
+
+function renderActionButton(shouldShow, content) {
+	return shouldShow ? content : null;
+}
+
+function buildNameStyle(nameOwnLine, canRename) {
+	var nameStyle = { cursor: canRename ? "pointer" : "default" };
+	if (nameOwnLine) {
+		nameStyle.color = "var(--text-strong)";
+		nameStyle.wordBreak = "break-word";
+	}
+	return nameStyle;
+}
+
+function renderSessionNameBlock(nameOwnLine, showName, nameControl, sessionBadges, renameCta) {
+	if (!(nameOwnLine && showName)) return null;
+	return html`<div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 w-full">
+		<div class="min-w-0 flex flex-col gap-1">
+			${nameControl}
+			${sessionBadges}
+		</div>
+		<div class="justify-self-end">${renameCta}</div>
+	</div>`;
+}
+
+function renderInlineNameBlock(nameOwnLine, showName, nameControl, sessionBadges) {
+	if (nameOwnLine || !showName) return null;
+	return html`<div class="flex flex-col gap-1">
+		${nameControl}
+		${sessionBadges}
+	</div>`;
+}
+
+function renderSessionSelectors({
+	showSelectors,
+	shouldShowAgentPicker,
+	agentPicker,
+	agentSelectValue,
+	onAgentChange,
+	shouldShowNodePicker,
+	nodePicker,
+	currentNodeId,
+	onNodeChange,
+	switchingNode,
+}) {
+	if (!showSelectors) return null;
+	return html`
+		${
+			shouldShowAgentPicker &&
+			html`
+				<${ComboSelect}
+					options=${agentPicker.options}
+					value=${agentSelectValue}
+					onChange=${onAgentChange}
+					placeholder="Session agent"
+					searchable=${false}
+					allowEmpty=${false}
+					fullWidth=${false}
+					disabled=${agentPicker.disabled}
+				/>
+			`
+		}
+		${
+			shouldShowNodePicker &&
+			html`
+				<${ComboSelect}
+					options=${nodePicker.options}
+					value=${currentNodeId}
+					onChange=${onNodeChange}
+					placeholder="Session node"
+					searchable=${false}
+					allowEmpty=${false}
+					fullWidth=${false}
+					disabled=${switchingNode}
+				/>
+			`
+		}
+	`;
+}
+
+function renderSessionActions({
+	showDelete,
+	isMain,
+	actionButtonClass,
+	onDelete,
+	showFork,
+	isCron,
+	onFork,
+	showShare,
+	onShare,
+	showStop,
+	canStop,
+	onStop,
+	stopping,
+	showClear,
+	onClear,
+	clearing,
+}) {
+	return html`
+		${renderActionButton(
+			showDelete && !isMain,
+			html`
+				<button
+					class=${`${actionButtonClass} chat-session-btn-danger inline-flex items-center gap-1.5`}
+					onClick=${onDelete}
+					title="Delete session"
+					style=${{ background: "var(--error)", borderColor: "var(--error)", color: "#fff" }}
+				>
+					<span class="icon icon-sm icon-x-circle shrink-0"></span>
+					Delete
+				</button>
+			`,
+		)}
+		${renderActionButton(
+			showFork && !isCron,
+			html`
+				<button class=${`${actionButtonClass} inline-flex items-center gap-1.5`} onClick=${onFork} title="Fork session">
+					<span class="icon icon-sm icon-layers shrink-0"></span>
+					Fork
+				</button>
+			`,
+		)}
+		${renderActionButton(
+			showShare && !isCron,
+			html`
+				<button class=${`${actionButtonClass} inline-flex items-center gap-1.5`} onClick=${onShare} title="Share snapshot">
+					<span class="icon icon-sm icon-share shrink-0"></span>
+					Share
+				</button>
+			`,
+		)}
+		${renderActionButton(
+			showStop && canStop,
+			html`
+				<button class=${actionButtonClass} onClick=${onStop} title="Stop generation" disabled=${stopping}>
+					${stopping ? "Stopping\u2026" : "Stop"}
+				</button>
+			`,
+		)}
+		${renderActionButton(
+			showClear && isMain,
+			html`
+				<button class=${actionButtonClass} onClick=${onClear} title="Clear session" disabled=${clearing}>
+					${clearing ? "Clearing\u2026" : "Clear"}
+				</button>
+			`,
+		)}
+	`;
+}
+
+function renderSessionHeaderLayout({
+	nameOwnLine,
+	showName,
+	nameControl,
+	sessionBadges,
+	renameCta,
+	showSelectors,
+	shouldShowAgentPicker,
+	agentPicker,
+	agentSelectValue,
+	onAgentChange,
+	shouldShowNodePicker,
+	nodePicker,
+	currentNodeId,
+	onNodeChange,
+	switchingNode,
+	showDelete,
+	isMain,
+	actionButtonClass,
+	onDelete,
+	showFork,
+	isCron,
+	onFork,
+	showShare,
+	onShare,
+	showStop,
+	canStop,
+	onStop,
+	stopping,
+	showClear,
+	onClear,
+	clearing,
+}) {
+	return html`
+		<div class=${nameOwnLine ? "flex flex-col gap-2 w-full" : "flex items-center gap-2"}>
+			${renderSessionNameBlock(nameOwnLine, showName, nameControl, sessionBadges, renameCta)}
+			<div class=${nameOwnLine ? "flex flex-wrap items-center gap-2" : "flex items-center gap-2"}>
+				${renderSessionSelectors({
+					showSelectors,
+					shouldShowAgentPicker,
+					agentPicker,
+					agentSelectValue,
+					onAgentChange,
+					shouldShowNodePicker,
+					nodePicker,
+					currentNodeId,
+					onNodeChange,
+					switchingNode,
+				})}
+				${renderInlineNameBlock(nameOwnLine, showName, nameControl, sessionBadges)}
+				${!nameOwnLine && renameCta}
+				${renderSessionActions({
+					showDelete,
+					isMain,
+					actionButtonClass,
+					onDelete,
+					showFork,
+					isCron,
+					onFork,
+					showShare,
+					onShare,
+					showStop,
+					canStop,
+					onStop,
+					stopping,
+					showClear,
+					onClear,
+					clearing,
+				})}
+			</div>
+		</div>
+	`;
+}
+
 function nextSessionKey(currentKey) {
 	var allSessions = sessionStore.sessions.value;
 	var s = allSessions.find((x) => x.key === currentKey);
@@ -63,6 +419,239 @@ async function copyShareUrl(url, visibility) {
 	await shareLinkDialog(url, visibility);
 }
 
+function loadAgentOptions(setDefaultAgentId, setAgentOptions, setAgentOptionsLoaded, isCancelled) {
+	sendRpc("agents.list", {}).then((res) => {
+		if (isCancelled()) return;
+		if (!res?.ok) {
+			setAgentOptionsLoaded(true);
+			return;
+		}
+		var parsed = parseAgentsListPayload(res.payload);
+		setDefaultAgentId(parsed.defaultId);
+		setAgentOptions(parsed.agents);
+		setAgentOptionsLoaded(true);
+	});
+}
+
+function refreshNodeOptions(setNodeOptions, isCancelled) {
+	sendRpc("node.list", {}).then((res) => {
+		if (isCancelled() || !res?.ok) return;
+		setNodeOptions(Array.isArray(res.payload) ? res.payload : []);
+	});
+}
+
+function beginRename(canRename, setRenaming, inputRef, fullName) {
+	if (!canRename) return;
+	setRenaming(true);
+	requestAnimationFrame(() => {
+		if (!inputRef.current) return;
+		inputRef.current.value = fullName;
+		inputRef.current.focus();
+		inputRef.current.select();
+	});
+}
+
+function commitSessionRename(inputRef, setRenaming, fullName, currentKey) {
+	var value = inputRef.current?.value.trim() || "";
+	setRenaming(false);
+	if (!value || value === fullName) return;
+	sendRpc("sessions.patch", { key: currentKey, label: value }).then((res) => {
+		if (res?.ok) fetchSessions();
+	});
+}
+
+function handleRenameKeyPress(e, commitRename, setRenaming) {
+	if (e.key === "Enter" && !e.isComposing) {
+		e.preventDefault();
+		commitRename();
+	}
+	if (e.key === "Escape") {
+		setRenaming(false);
+	}
+}
+
+function forkSession(currentKey) {
+	sendRpc("sessions.fork", { key: currentKey }).then((res) => {
+		if (!(res?.ok && res.payload?.sessionKey)) return;
+		fetchSessions();
+		switchSession(res.payload.sessionKey);
+	});
+}
+
+function deleteSessionRpc(currentKey, nextKey, force = false) {
+	sendRpc("sessions.delete", { key: currentKey, force: force || undefined }).then((res) => {
+		if (res && !res.ok && res.error && res.error.indexOf("uncommitted changes") !== -1 && !force) {
+			confirmDialog("Worktree has uncommitted changes. Force delete?").then((yes) => {
+				if (!yes) return;
+				deleteSessionRpc(currentKey, nextKey, true);
+			});
+			return;
+		}
+		switchSession(nextKey);
+		fetchSessions();
+	});
+}
+
+function maybeDeleteSession(onBeforeDelete, currentKey, session) {
+	if (typeof onBeforeDelete === "function") {
+		onBeforeDelete();
+	}
+	var msgCount = session ? session.messageCount || 0 : 0;
+	var nextKey = nextSessionKey(currentKey);
+	var isUnmodifiedFork = session && session.forkPoint != null && msgCount <= session.forkPoint;
+	if (msgCount > 0 && !isUnmodifiedFork) {
+		confirmDialog("Delete this session?").then((yes) => {
+			if (yes) deleteSessionRpc(currentKey, nextKey);
+		});
+		return;
+	}
+	deleteSessionRpc(currentKey, nextKey);
+}
+
+function clearSession(clearing, setClearing) {
+	if (clearing) return;
+	setClearing(true);
+	clearActiveSession().finally(() => {
+		setClearing(false);
+	});
+}
+
+function stopSession(stopping, setStopping, currentKey, activeRunId) {
+	if (stopping) return;
+	var params = { sessionKey: currentKey };
+	if (activeRunId) params.runId = activeRunId;
+	setStopping(true);
+	sendRpc("chat.abort", params)
+		.then((res) => {
+			if (!res?.ok) {
+				showToast(res?.error?.message || "Failed to stop response", "error");
+				return;
+			}
+			setSessionActiveRunId(currentKey, null);
+			setSessionReplying(currentKey, false);
+		})
+		.finally(() => {
+			setStopping(false);
+		});
+}
+
+async function shareSessionSnapshot(currentKey, visibility) {
+	var res = await sendRpc("sessions.share.create", { key: currentKey, visibility: visibility });
+	if (!(res?.ok && res.payload?.path)) {
+		showToast(res?.error?.message || "Failed to create share link", "error");
+		return;
+	}
+
+	var url = buildShareUrl(res.payload);
+	await copyShareUrl(url, visibility);
+
+	if (visibility === "private") {
+		showToast("Private link includes a key, share it only with trusted people", "success");
+	}
+
+	switchSession(currentKey);
+	fetchSessions();
+}
+
+function startShareFlow(onBeforeShare, shareSnapshot) {
+	if (typeof onBeforeShare === "function") {
+		onBeforeShare();
+	}
+	shareVisibilityDialog().then((visibility) => {
+		if (!visibility) return;
+		void shareSnapshot(visibility);
+	});
+}
+
+function switchSessionAgent(nextAgentId, currentAgentId, switchingAgent, setSwitchingAgent, currentKey, session) {
+	if (!nextAgentId || nextAgentId === currentAgentId || switchingAgent) {
+		return;
+	}
+	setSwitchingAgent(true);
+	sendRpc("agents.set_session", {
+		session_key: currentKey,
+		agent_id: nextAgentId,
+	})
+		.then((res) => {
+			if (!res?.ok) {
+				showToast(res?.error?.message || "Failed to switch agent", "error");
+				return;
+			}
+			if (session) {
+				session.agent_id = nextAgentId;
+				session.dataVersion.value++;
+			}
+			fetchSessions();
+		})
+		.finally(() => {
+			setSwitchingAgent(false);
+		});
+}
+
+function switchSessionNode(nextNodeId, switchingNode, setSwitchingNode, currentKey, session) {
+	if (switchingNode) return;
+	setSwitchingNode(true);
+	sendRpc("nodes.set_session", {
+		session_key: currentKey,
+		node_id: nextNodeId || null,
+	})
+		.then((res) => {
+			if (!res?.ok) {
+				showToast(res?.error?.message || "Failed to switch node", "error");
+				return;
+			}
+			if (session) {
+				session.node_id = nextNodeId || null;
+				session.dataVersion.value++;
+			}
+			fetchSessions();
+		})
+		.finally(() => {
+			setSwitchingNode(false);
+		});
+}
+
+function getInitialAgentState(gonAgentsPayload) {
+	return {
+		initialAgentOptions: Array.isArray(gonAgentsPayload?.agents) ? gonAgentsPayload.agents : [],
+		initialDefaultAgentId: typeof gonAgentsPayload?.defaultId === "string" ? gonAgentsPayload.defaultId : "main",
+	};
+}
+
+function getSessionHeaderDisplay(session, currentKey, nameOwnLine, defaultAgentId) {
+	var fullName = session ? session.label || session.key : currentKey;
+	return {
+		fullName,
+		displayName: nameOwnLine ? fullName : fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName,
+		replying: session?.replying.value,
+		activeRunId: session?.activeRunId.value || null,
+		currentAgentId: session?.agent_id || defaultAgentId || "main",
+		currentNodeId: session?.node_id || "",
+		workspaceLabel: session?.workspaceLabel || session?.workspace || "",
+		routeLabel: executionRouteLabel(session?.executionRoute || "local"),
+		sourceLabel: externalSourceLabel(session?.externalAgentSource || "native"),
+	};
+}
+
+function getSessionHeaderStatus(currentKey, replying) {
+	var isMain = currentKey === "main";
+	var isCron = currentKey.startsWith("cron:");
+	return {
+		isMain,
+		isCron,
+		canRename: !(isMain || isCron),
+		canStop: !isCron && replying,
+	};
+}
+
+function showAgentPickerForSession(isCron, agentOptionsLoaded, agentOptions, agentPicker) {
+	return !isCron && agentOptionsLoaded && (agentOptions.length > 1 || !agentPicker.hasCurrentAgentOption);
+}
+
+function showNodePickerForSession(isCron, nodeOptions, currentNodeId) {
+	return !isCron && (nodeOptions.length > 0 || Boolean(currentNodeId));
+}
+
 export function SessionHeader({
 	showSelectors = true,
 	showName = true,
@@ -80,8 +669,7 @@ export function SessionHeader({
 	var session = sessionStore.activeSession.value;
 	var currentKey = sessionStore.activeSessionKey.value;
 	var gonAgentsPayload = parseAgentsListPayload(gon.get("agents"));
-	var initialAgentOptions = Array.isArray(gonAgentsPayload?.agents) ? gonAgentsPayload.agents : [];
-	var initialDefaultAgentId = typeof gonAgentsPayload?.defaultId === "string" ? gonAgentsPayload.defaultId : "main";
+	var { initialAgentOptions, initialDefaultAgentId } = getInitialAgentState(gonAgentsPayload);
 
 	var [renaming, setRenaming] = useState(false);
 	var [clearing, setClearing] = useState(false);
@@ -94,31 +682,22 @@ export function SessionHeader({
 	var [switchingNode, setSwitchingNode] = useState(false);
 	var inputRef = useRef(null);
 
-	var fullName = session ? session.label || session.key : currentKey;
-	var displayName = nameOwnLine ? fullName : fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
-	var replying = session?.replying.value;
-	var activeRunId = session?.activeRunId.value || null;
-
-	var isMain = currentKey === "main";
-	var isCron = currentKey.startsWith("cron:");
-	var canRename = !(isMain || isCron);
-	var canStop = !isCron && replying;
-	var currentAgentId = session?.agent_id || defaultAgentId || "main";
-	var currentNodeId = session?.node_id || "";
+	var {
+		fullName,
+		displayName,
+		replying,
+		activeRunId,
+		currentAgentId,
+		currentNodeId,
+		workspaceLabel,
+		routeLabel,
+		sourceLabel,
+	} = getSessionHeaderDisplay(session, currentKey, nameOwnLine, defaultAgentId);
+	var { isMain, isCron, canRename, canStop } = getSessionHeaderStatus(currentKey, replying);
 
 	useEffect(() => {
 		var cancelled = false;
-		sendRpc("agents.list", {}).then((res) => {
-			if (cancelled) return;
-			if (!res?.ok) {
-				setAgentOptionsLoaded(true);
-				return;
-			}
-			var parsed = parseAgentsListPayload(res.payload);
-			setDefaultAgentId(parsed.defaultId);
-			setAgentOptions(parsed.agents);
-			setAgentOptionsLoaded(true);
-		});
+		loadAgentOptions(setDefaultAgentId, setAgentOptions, setAgentOptionsLoaded, () => cancelled);
 		return () => {
 			cancelled = true;
 		};
@@ -127,12 +706,7 @@ export function SessionHeader({
 	// Fetch connected nodes and subscribe to presence updates.
 	useEffect(() => {
 		var cancelled = false;
-		var fetchNodes = () => {
-			sendRpc("node.list", {}).then((res) => {
-				if (cancelled || !res?.ok) return;
-				setNodeOptions(Array.isArray(res.payload) ? res.payload : []);
-			});
-		};
+		var fetchNodes = () => refreshNodeOptions(setNodeOptions, () => cancelled);
 		fetchNodes();
 		var unsub = onEvent("presence", () => {
 			if (!cancelled) fetchNodes();
@@ -144,368 +718,121 @@ export function SessionHeader({
 	}, [currentKey]);
 
 	var startRename = useCallback(() => {
-		if (!canRename) return;
-		setRenaming(true);
-		requestAnimationFrame(() => {
-			if (inputRef.current) {
-				inputRef.current.value = fullName;
-				inputRef.current.focus();
-				inputRef.current.select();
-			}
-		});
+		beginRename(canRename, setRenaming, inputRef, fullName);
 	}, [canRename, fullName]);
 
 	var commitRename = useCallback(() => {
-		var val = inputRef.current?.value.trim() || "";
-		setRenaming(false);
-		if (val && val !== fullName) {
-			sendRpc("sessions.patch", { key: currentKey, label: val }).then((res) => {
-				if (res?.ok) fetchSessions();
-			});
-		}
+		commitSessionRename(inputRef, setRenaming, fullName, currentKey);
 	}, [currentKey, fullName]);
 
 	var onKeyDown = useCallback(
 		(e) => {
-			if (e.key === "Enter" && !e.isComposing) {
-				e.preventDefault();
-				commitRename();
-			}
-			if (e.key === "Escape") {
-				setRenaming(false);
-			}
+			handleRenameKeyPress(e, commitRename, setRenaming);
 		},
 		[commitRename],
 	);
 
 	var onFork = useCallback(() => {
-		sendRpc("sessions.fork", { key: currentKey }).then((res) => {
-			if (res?.ok && res.payload?.sessionKey) {
-				fetchSessions();
-				switchSession(res.payload.sessionKey);
-			}
-		});
+		forkSession(currentKey);
 	}, [currentKey]);
 
 	var onDelete = useCallback(() => {
-		if (typeof onBeforeDelete === "function") {
-			onBeforeDelete();
-		}
-		var msgCount = session ? session.messageCount || 0 : 0;
-		var nextKey = nextSessionKey(currentKey);
-		var doDelete = () => {
-			sendRpc("sessions.delete", { key: currentKey }).then((res) => {
-				if (res && !res.ok && res.error && res.error.indexOf("uncommitted changes") !== -1) {
-					confirmDialog("Worktree has uncommitted changes. Force delete?").then((yes) => {
-						if (!yes) return;
-						sendRpc("sessions.delete", { key: currentKey, force: true }).then(() => {
-							switchSession(nextKey);
-							fetchSessions();
-						});
-					});
-					return;
-				}
-				switchSession(nextKey);
-				fetchSessions();
-			});
-		};
-		var isUnmodifiedFork = session && session.forkPoint != null && msgCount <= session.forkPoint;
-		if (msgCount > 0 && !isUnmodifiedFork) {
-			confirmDialog("Delete this session?").then((yes) => {
-				if (yes) doDelete();
-			});
-		} else {
-			doDelete();
-		}
+		maybeDeleteSession(onBeforeDelete, currentKey, session);
 	}, [currentKey, onBeforeDelete, session]);
 
 	var onClear = useCallback(() => {
-		if (clearing) return;
-		setClearing(true);
-		clearActiveSession().finally(() => {
-			setClearing(false);
-		});
+		clearSession(clearing, setClearing);
 	}, [clearing]);
 
 	var onStop = useCallback(() => {
-		if (stopping) return;
-		var params = { sessionKey: currentKey };
-		if (activeRunId) params.runId = activeRunId;
-		setStopping(true);
-		sendRpc("chat.abort", params)
-			.then((res) => {
-				if (!res?.ok) {
-					showToast(res?.error?.message || "Failed to stop response", "error");
-					return;
-				}
-				setSessionActiveRunId(currentKey, null);
-				setSessionReplying(currentKey, false);
-			})
-			.finally(() => {
-				setStopping(false);
-			});
+		stopSession(stopping, setStopping, currentKey, activeRunId);
 	}, [activeRunId, currentKey, stopping]);
 
 	var shareSnapshot = useCallback(
 		async (visibility) => {
-			var res = await sendRpc("sessions.share.create", { key: currentKey, visibility: visibility });
-			if (!(res?.ok && res.payload?.path)) {
-				showToast(res?.error?.message || "Failed to create share link", "error");
-				return;
-			}
-
-			var url = buildShareUrl(res.payload);
-			await copyShareUrl(url, visibility);
-
-			if (visibility === "private") {
-				showToast("Private link includes a key, share it only with trusted people", "success");
-			}
-
-			// Reload the active session so the snapshot cutoff notice appears.
-			switchSession(currentKey);
-			fetchSessions();
+			await shareSessionSnapshot(currentKey, visibility);
 		},
 		[currentKey],
 	);
 
 	var onShare = useCallback(() => {
-		if (typeof onBeforeShare === "function") {
-			onBeforeShare();
-		}
-		shareVisibilityDialog().then((visibility) => {
-			if (!visibility) return;
-			void shareSnapshot(visibility);
-		});
+		startShareFlow(onBeforeShare, shareSnapshot);
 	}, [onBeforeShare, shareSnapshot]);
 
 	var onAgentChange = useCallback(
 		(nextAgentId) => {
-			if (!nextAgentId || nextAgentId === currentAgentId || switchingAgent) {
-				return;
-			}
-			setSwitchingAgent(true);
-			sendRpc("agents.set_session", {
-				session_key: currentKey,
-				agent_id: nextAgentId,
-			})
-				.then((res) => {
-					if (!res?.ok) {
-						showToast(res?.error?.message || "Failed to switch agent", "error");
-						return;
-					}
-					if (session) {
-						session.agent_id = nextAgentId;
-						session.dataVersion.value++;
-					}
-					fetchSessions();
-				})
-				.finally(() => {
-					setSwitchingAgent(false);
-				});
+			switchSessionAgent(nextAgentId, currentAgentId, switchingAgent, setSwitchingAgent, currentKey, session);
 		},
 		[currentAgentId, currentKey, session, switchingAgent],
 	);
 
 	var onNodeChange = useCallback(
 		(nextNodeId) => {
-			if (switchingNode) return;
-			setSwitchingNode(true);
-			sendRpc("nodes.set_session", {
-				session_key: currentKey,
-				node_id: nextNodeId || null,
-			})
-				.then((res) => {
-					if (!res?.ok) {
-						showToast(res?.error?.message || "Failed to switch node", "error");
-						return;
-					}
-					if (session) {
-						session.node_id = nextNodeId || null;
-						session.dataVersion.value++;
-					}
-					fetchSessions();
-				})
-				.finally(() => {
-					setSwitchingNode(false);
-				});
+			switchSessionNode(nextNodeId, switchingNode, setSwitchingNode, currentKey, session);
 		},
 		[currentKey, session, switchingNode],
 	);
 
 	var agentSelectValue = currentAgentId;
-	var hasCurrentAgentOption = agentOptions.some((agent) => agent.id === agentSelectValue);
-	var agentSelectOptions = agentOptions.map((agent) => {
-		var prefix = agent.emoji ? `${agent.emoji} ` : "";
-		var suffix = agent.id === defaultAgentId ? " (default)" : "";
-		return {
-			value: agent.id,
-			label: `${prefix}${agent.name}${suffix}`,
-		};
-	});
-	if (!hasCurrentAgentOption && agentSelectValue && (switchingAgent || agentOptionsLoaded)) {
-		agentSelectOptions = [
-			{
-				value: agentSelectValue,
-				label: switchingAgent ? "Switching…" : `agent:${agentSelectValue}`,
-			},
-			...agentSelectOptions,
-		];
-	}
-	var agentSelectDisabled = switchingAgent || agentSelectOptions.length === 0;
-	var shouldShowAgentPicker = !isCron && agentOptionsLoaded && (agentOptions.length > 1 || !hasCurrentAgentOption);
+	var agentPicker = buildAgentPickerState(
+		agentOptions,
+		agentSelectValue,
+		defaultAgentId,
+		switchingAgent,
+		agentOptionsLoaded,
+	);
+	var shouldShowAgentPicker = showAgentPickerForSession(isCron, agentOptionsLoaded, agentOptions, agentPicker);
+	var nodePicker = buildNodePickerState(nodeOptions, currentNodeId, switchingNode);
+	var shouldShowNodePicker = showNodePickerForSession(isCron, nodeOptions, currentNodeId);
 
-	var shouldShowNodePicker = !isCron && (nodeOptions.length > 0 || Boolean(currentNodeId));
-	var hasCurrentNodeOption = currentNodeId === "" || nodeOptions.some((node) => node.nodeId === currentNodeId);
-	var nodeSelectOptions = [
-		{ value: "", label: "Local" },
-		...nodeOptions.map((node) => ({
-			value: node.nodeId,
-			label: nodeOptionLabel(node),
-		})),
-	];
-	if (!hasCurrentNodeOption && currentNodeId) {
-		var fallbackLabel = currentNodeId.startsWith("ssh:") ? `SSH: ${currentNodeId.slice(4)}` : `node:${currentNodeId}`;
-		nodeSelectOptions = [
-			{
-				value: currentNodeId,
-				label: switchingNode ? "Switching…" : fallbackLabel,
-			},
-			...nodeSelectOptions,
-		];
-	}
-
-	var nameStyle = { cursor: canRename ? "pointer" : "default" };
-	if (nameOwnLine) {
-		nameStyle.color = "var(--text-strong)";
-		nameStyle.wordBreak = "break-word";
-	}
+	var nameStyle = buildNameStyle(nameOwnLine, canRename);
 	var renameInputStyle = nameOwnLine ? { maxWidth: "none", width: "100%" } : undefined;
+	var sessionBadges = renderSessionBadges(session, workspaceLabel, routeLabel, sourceLabel);
+	var nameControl = renderNameControl({
+		showName,
+		renaming,
+		inputRef,
+		renameInputStyle,
+		commitRename,
+		onKeyDown,
+		nameStyle,
+		canRename,
+		startRename,
+		displayName,
+	});
+	var renameCta = renderRenameButton(showName, showRenameButton, canRename, renaming, actionButtonClass, startRename);
 
-	var nameControl =
-		showName &&
-		(renaming
-			? html`<input
-				ref=${inputRef}
-				class="chat-session-rename-input"
-				style=${renameInputStyle}
-				onBlur=${commitRename}
-				onKeyDown=${onKeyDown}
-			/>`
-			: html`<span
-				class="chat-session-name"
-				style=${nameStyle}
-				title=${canRename ? "Click to rename" : ""}
-				onClick=${startRename}
-			>${displayName}</span>`);
-
-	var renameCta =
-		showName &&
-		showRenameButton &&
-		canRename &&
-		!renaming &&
-		html`<button class=${actionButtonClass} onClick=${startRename} title="Rename session">
-			Rename
-		</button>`;
-
-	return html`
-			<div class=${nameOwnLine ? "flex flex-col gap-2 w-full" : "flex items-center gap-2"}>
-				${
-					nameOwnLine &&
-					showName &&
-					html`<div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 w-full">
-						<div class="min-w-0">${nameControl}</div>
-						<div class="justify-self-end">${renameCta}</div>
-					</div>`
-				}
-			<div class=${nameOwnLine ? "flex flex-wrap items-center gap-2" : "flex items-center gap-2"}>
-			${
-				showSelectors &&
-				shouldShowAgentPicker &&
-				html`
-				<${ComboSelect}
-					options=${agentSelectOptions}
-					value=${agentSelectValue}
-					onChange=${onAgentChange}
-					placeholder="Session agent"
-					searchable=${false}
-					allowEmpty=${false}
-					fullWidth=${false}
-					disabled=${agentSelectDisabled}
-				/>
-			`
-			}
-			${
-				showSelectors &&
-				shouldShowNodePicker &&
-				html`
-				<${ComboSelect}
-					options=${nodeSelectOptions}
-					value=${currentNodeId}
-					onChange=${onNodeChange}
-					placeholder="Session node"
-					searchable=${false}
-					allowEmpty=${false}
-					fullWidth=${false}
-					disabled=${switchingNode}
-				/>
-			`
-			}
-			${!nameOwnLine && showName && nameControl}
-			${!nameOwnLine && renameCta}
-				${
-					showDelete &&
-					!isMain &&
-					html`
-					<button
-						class=${`${actionButtonClass} chat-session-btn-danger inline-flex items-center gap-1.5`}
-						onClick=${onDelete}
-						title="Delete session"
-						style=${{ background: "var(--error)", borderColor: "var(--error)", color: "#fff" }}
-					>
-						<span class="icon icon-sm icon-x-circle shrink-0"></span>
-						Delete
-					</button>
-				`
-				}
-				${
-					showFork &&
-					!isCron &&
-					html`
-					<button class=${`${actionButtonClass} inline-flex items-center gap-1.5`} onClick=${onFork} title="Fork session">
-						<span class="icon icon-sm icon-layers shrink-0"></span>
-						Fork
-					</button>
-				`
-				}
-				${
-					showShare &&
-					!isCron &&
-					html`
-					<button class=${`${actionButtonClass} inline-flex items-center gap-1.5`} onClick=${onShare} title="Share snapshot">
-						<span class="icon icon-sm icon-share shrink-0"></span>
-						Share
-					</button>
-				`
-				}
-				${
-					showStop &&
-					canStop &&
-					html`
-					<button class=${actionButtonClass} onClick=${onStop} title="Stop generation" disabled=${stopping}>
-						${stopping ? "Stopping\u2026" : "Stop"}
-					</button>
-				`
-				}
-				${
-					showClear &&
-					isMain &&
-					html`
-					<button class=${actionButtonClass} onClick=${onClear} title="Clear session" disabled=${clearing}>
-						${clearing ? "Clearing\u2026" : "Clear"}
-					</button>
-				`
-				}
-			</div>
-		</div>
-	`;
+	return renderSessionHeaderLayout({
+		nameOwnLine,
+		showName,
+		nameControl,
+		sessionBadges,
+		renameCta,
+		showSelectors,
+		shouldShowAgentPicker,
+		agentPicker,
+		agentSelectValue,
+		onAgentChange,
+		shouldShowNodePicker,
+		nodePicker,
+		currentNodeId,
+		onNodeChange,
+		switchingNode,
+		showDelete,
+		isMain,
+		actionButtonClass,
+		onDelete,
+		showFork,
+		isCron,
+		onFork,
+		showShare,
+		onShare,
+		showStop,
+		canStop,
+		onStop,
+		stopping,
+		showClear,
+		onClear,
+		clearing,
+	});
 }

@@ -12,7 +12,10 @@ use {
     moltis_common::hooks::HookRegistry,
     moltis_projects::ProjectStore,
     moltis_sessions::{
-        message::PersistedMessage, metadata::SqliteSessionMetadata, state_store::SessionStateStore,
+        coordinator::{self, CoordinationPatch, CoordinationState, ExternalActivity},
+        message::PersistedMessage,
+        metadata::{ExternalAgentSource, SessionEntry, SqliteSessionMetadata},
+        state_store::SessionStateStore,
         store::SessionStore,
     },
     moltis_tools::sandbox::SandboxRouter,
@@ -21,7 +24,10 @@ use {
 use crate::{
     agent_persona::AgentPersonaStore,
     services::{ServiceError, ServiceResult, SessionService, TtsService},
-    session_types::{PatchParams, VoiceGenerateParams, VoiceTarget, parse_params},
+    session_types::{
+        CoordinationSetParams, ExternalAttachParams, PatchParams, VoiceGenerateParams, VoiceTarget,
+        parse_params,
+    },
     share_store::{
         ShareSnapshot, ShareStore, ShareVisibility, SharedImageAsset, SharedImageSet,
         SharedMapLinks, SharedMessage, SharedMessageRole,
@@ -37,6 +43,104 @@ const SESSION_PREVIEW_MAX_CHARS: usize = 200;
 const UI_HISTORY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const UI_HISTORY_MIN_MESSAGES: usize = 120;
 const UI_HISTORY_TRIM_STEP: usize = 50;
+const EXTERNAL_ACTIVITY_NOTICE_PREFIX: &str = "Attached external agent activity";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionRoute {
+    Local,
+    Sandbox,
+    Ssh,
+    Node,
+}
+
+impl ExecutionRoute {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Sandbox => "sandbox",
+            Self::Ssh => "ssh",
+            Self::Node => "node",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local host",
+            Self::Sandbox => "Sandbox",
+            Self::Ssh => "SSH target",
+            Self::Node => "Paired node",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    Web,
+    Channel,
+    Cron,
+}
+
+impl SessionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Channel => "channel",
+            Self::Cron => "cron",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionSurface {
+    surface: String,
+    session_kind: SessionKind,
+}
+
+fn infer_session_surface(entry: &SessionEntry) -> SessionSurface {
+    if entry.key == "cron:heartbeat" {
+        return SessionSurface {
+            surface: "heartbeat".to_string(),
+            session_kind: SessionKind::Cron,
+        };
+    }
+
+    if entry.key.starts_with("cron:") {
+        return SessionSurface {
+            surface: "cron".to_string(),
+            session_kind: SessionKind::Cron,
+        };
+    }
+
+    if let Some(binding_json) = entry.channel_binding.as_deref()
+        && let Ok(binding) =
+            serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+    {
+        return SessionSurface {
+            surface: binding.channel_type.as_str().to_string(),
+            session_kind: SessionKind::Channel,
+        };
+    }
+
+    SessionSurface {
+        surface: "web".to_string(),
+        session_kind: SessionKind::Web,
+    }
+}
+
+fn normalize_session_source(source: Option<ExternalAgentSource>) -> ExternalAgentSource {
+    source.unwrap_or(ExternalAgentSource::Native)
+}
+
+fn external_source_display_name(source: ExternalAgentSource) -> &'static str {
+    match source {
+        ExternalAgentSource::Native => "Native",
+        ExternalAgentSource::Codex => "Codex",
+        ExternalAgentSource::ClaudeCode => "Claude Code",
+        ExternalAgentSource::Copilot => "Copilot",
+        ExternalAgentSource::Api => "API",
+        ExternalAgentSource::Imported => "Imported",
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -883,7 +987,7 @@ impl LiveSessionService {
 
     async fn resolve_agent_id_for_entry(
         &self,
-        entry: &moltis_sessions::metadata::SessionEntry,
+        entry: &SessionEntry,
         patch_if_invalid: bool,
     ) -> String {
         let fallback = self.default_agent_id().await;
@@ -940,7 +1044,7 @@ impl LiveSessionService {
         &self,
         key: &str,
         inherit_from_key: Option<&str>,
-    ) -> Option<moltis_sessions::metadata::SessionEntry> {
+    ) -> Option<SessionEntry> {
         let entry = self.metadata.get(key).await?;
         if entry
             .agent_id
@@ -968,6 +1072,360 @@ impl LiveSessionService {
 
         let _ = self.metadata.set_agent_id(key, Some(&fallback)).await;
         self.metadata.get(key).await
+    }
+
+    async fn effective_execution_route(&self, entry: &SessionEntry) -> ExecutionRoute {
+        if let Some(node_id) = entry.node_id.as_deref() {
+            return if node_id.starts_with("ssh:") {
+                ExecutionRoute::Ssh
+            } else {
+                ExecutionRoute::Node
+            };
+        }
+
+        if let Some(ref router) = self.sandbox_router {
+            if router.is_sandboxed(&entry.key).await {
+                return ExecutionRoute::Sandbox;
+            }
+        } else if entry.sandbox_enabled == Some(true) {
+            return ExecutionRoute::Sandbox;
+        }
+
+        ExecutionRoute::Local
+    }
+
+    async fn workspace_label(&self, project_id: Option<&str>) -> Option<String> {
+        let Some(project_id) = project_id else {
+            return None;
+        };
+        self.project_for_id(project_id)
+            .await
+            .map(|project| project.label)
+    }
+
+    async fn project_for_id(&self, project_id: &str) -> Option<moltis_projects::Project> {
+        let Some(ref project_store) = self.project_store else {
+            return None;
+        };
+        project_store.get(project_id).await.ok().flatten()
+    }
+
+    async fn project_preferred_machine_id(&self, project_id: Option<&str>) -> Option<String> {
+        let project_id = project_id?;
+        self.project_for_id(project_id)
+            .await
+            .and_then(|project| project.preferred_machine_id)
+            .map(|machine_id| machine_id.trim().to_string())
+            .filter(|machine_id| !machine_id.is_empty())
+    }
+
+    async fn apply_machine_binding(&self, session_key: &str, machine_id: Option<&str>) {
+        let normalized_machine_id = machine_id
+            .map(str::trim)
+            .filter(|machine_id| !machine_id.is_empty())
+            .unwrap_or(crate::machine::LOCAL_MACHINE_ID);
+
+        match normalized_machine_id {
+            crate::machine::LOCAL_MACHINE_ID => {
+                let _ = self.metadata.set_node_id(session_key, None).await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(false))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, false).await;
+                }
+            },
+            crate::machine::SANDBOX_MACHINE_ID => {
+                let _ = self.metadata.set_node_id(session_key, None).await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(true))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, true).await;
+                }
+            },
+            _ => {
+                let _ = self
+                    .metadata
+                    .set_node_id(session_key, Some(normalized_machine_id))
+                    .await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(false))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, false).await;
+                }
+            },
+        }
+    }
+
+    async fn apply_project_machine_binding(&self, session_key: &str, project_id: Option<&str>) {
+        let preferred_machine_id = self.project_preferred_machine_id(project_id).await;
+        self.apply_machine_binding(session_key, preferred_machine_id.as_deref())
+            .await;
+    }
+
+    fn preferred_machine_payload(machine_id: Option<&str>, sandbox_available: bool) -> Value {
+        let Some(machine_id) = machine_id else {
+            return Value::Null;
+        };
+        serde_json::to_value(crate::machine::session_binding_from_machine_id(
+            machine_id,
+            sandbox_available,
+        ))
+        .unwrap_or(Value::Null)
+    }
+
+    async fn load_coordination(&self, session_key: &str) -> CoordinationState {
+        let Some(ref store) = self.state_store else {
+            return CoordinationState::default();
+        };
+        coordinator::load(store, session_key)
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn is_active_channel_session(&self, entry: &SessionEntry) -> bool {
+        let Some(binding_json) = entry.channel_binding.as_deref() else {
+            return false;
+        };
+        let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+        else {
+            return false;
+        };
+        self.metadata
+            .get_active_session(
+                target.channel_type.as_str(),
+                &target.account_id,
+                &target.chat_id,
+                target.thread_id.as_deref(),
+            )
+            .await
+            .map(|key| key == entry.key)
+            .unwrap_or(false)
+    }
+
+    fn coordination_payload(coordination: &CoordinationState) -> Value {
+        serde_json::json!({
+            "decision": coordination.decision,
+            "currentPlan": coordination.current_plan,
+            "nextAction": coordination.next_action,
+            "routeConstraints": coordination.route_constraints,
+            "durableNotes": coordination.durable_notes,
+        })
+    }
+
+    fn external_activities_payload(activities: &[ExternalActivity]) -> Vec<Value> {
+        activities
+            .iter()
+            .map(|activity| {
+                serde_json::json!({
+                    "id": activity.id,
+                    "source": activity.source.as_str(),
+                    "title": activity.title,
+                    "summary": activity.summary,
+                    "link": activity.link,
+                    "attachedAt": activity.attached_at,
+                    "importedSessionKey": activity.imported_session_key,
+                    "importedMessageCount": activity.imported_message_count,
+                })
+            })
+            .collect()
+    }
+
+    fn machine_payload(
+        route: ExecutionRoute,
+        entry: &SessionEntry,
+        sandbox_available: bool,
+    ) -> Value {
+        let (id, kind, trust_state, health, available) = match route {
+            ExecutionRoute::Local => ("local".to_string(), "local", "trusted_local", "ready", true),
+            ExecutionRoute::Sandbox => (
+                "sandbox".to_string(),
+                "sandbox",
+                "sandboxed",
+                if sandbox_available {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                sandbox_available,
+            ),
+            ExecutionRoute::Ssh => (
+                entry
+                    .node_id
+                    .clone()
+                    .unwrap_or_else(|| "ssh:unresolved".to_string()),
+                "ssh",
+                "managed_ssh",
+                if entry.node_id.is_some() {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                entry.node_id.is_some(),
+            ),
+            ExecutionRoute::Node => (
+                entry
+                    .node_id
+                    .clone()
+                    .unwrap_or_else(|| "node:unresolved".to_string()),
+                "node",
+                "paired_node",
+                if entry.node_id.is_some() {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                entry.node_id.is_some(),
+            ),
+        };
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "route": route.as_str(),
+            "executionRoute": route.as_str(),
+            "label": route.label(),
+            "nodeId": entry.node_id,
+            "trustState": trust_state,
+            "health": health,
+            "available": available,
+        })
+    }
+
+    async fn present_session_entry(
+        &self,
+        entry: &SessionEntry,
+        preview: Option<&str>,
+        active_channel: bool,
+        agent_id: Option<String>,
+    ) -> Value {
+        let surface = infer_session_surface(entry);
+        let execution_route = self.effective_execution_route(entry).await;
+        let sandbox_available =
+            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
+        let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
+        let external_source = normalize_session_source(entry.external_agent_source);
+
+        serde_json::json!({
+            "id": entry.id,
+            "key": entry.key,
+            "label": entry.label,
+            "model": entry.model,
+            "createdAt": entry.created_at,
+            "updatedAt": entry.updated_at,
+            "messageCount": entry.message_count,
+            "lastSeenMessageCount": entry.last_seen_message_count,
+            "projectId": entry.project_id,
+            "workspace": entry.project_id,
+            "workspaceLabel": workspace_label,
+            "sandbox_enabled": entry.sandbox_enabled,
+            "sandbox_image": entry.sandbox_image,
+            "worktree_branch": entry.worktree_branch,
+            "channelBinding": entry.channel_binding,
+            "activeChannel": active_channel,
+            "parentSessionKey": entry.parent_session_key,
+            "forkPoint": entry.fork_point,
+            "mcpDisabled": entry.mcp_disabled,
+            "preview": preview,
+            "archived": entry.archived,
+            "agent_id": agent_id.clone(),
+            "agentId": agent_id,
+            "node_id": entry.node_id,
+            "surface": surface.surface,
+            "sessionKind": surface.session_kind.as_str(),
+            "executionRoute": execution_route.as_str(),
+            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "externalAgentSource": external_source.as_str(),
+            "version": entry.version,
+        })
+    }
+
+    async fn workspace_overview_for_entry(&self, entry: &SessionEntry) -> Value {
+        let coordination = self.load_coordination(&entry.key).await;
+        let linked_project = if let Some(project_id) = entry.project_id.as_deref() {
+            if let Some(ref project_store) = self.project_store {
+                project_store
+                    .get(project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|project| {
+                        let preferred_machine_id = project.preferred_machine_id.clone();
+                        serde_json::json!({
+                            "id": project.id,
+                            "label": project.label,
+                            "directory": project.directory,
+                            "preferredMachineId": preferred_machine_id,
+                            "preferredMachine": Self::preferred_machine_payload(
+                                preferred_machine_id.as_deref(),
+                                crate::machine::sandbox_router_available(self.sandbox_router.as_ref()),
+                            ),
+                        })
+                    })
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        } else {
+            Value::Null
+        };
+
+        let recent_sessions = if let Some(project_id) = entry.project_id.as_deref() {
+            let mut items = Vec::new();
+            for recent in self
+                .metadata
+                .list()
+                .await
+                .into_iter()
+                .filter(|recent| recent.project_id.as_deref() == Some(project_id))
+                .take(6)
+            {
+                let route = self.effective_execution_route(&recent).await;
+                items.push(serde_json::json!({
+                    "key": recent.key,
+                    "label": recent.label,
+                    "updatedAt": recent.updated_at,
+                    "messageCount": recent.message_count,
+                    "executionRoute": route.as_str(),
+                    "externalAgentSource": normalize_session_source(recent.external_agent_source).as_str(),
+                }));
+            }
+            items
+        } else {
+            Vec::new()
+        };
+
+        let source_counts = coordination.external_activities.iter().fold(
+            std::collections::BTreeMap::<&'static str, u64>::new(),
+            |mut acc, activity| {
+                *acc.entry(activity.source.as_str()).or_default() += 1;
+                acc
+            },
+        );
+
+        let approval_mode = moltis_config::discover_and_load().tools.exec.approval_mode;
+        let execution_route = self.effective_execution_route(entry).await;
+        let sandbox_available =
+            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
+
+        serde_json::json!({
+            "workspaceId": entry.project_id,
+            "workspaceLabel": self.workspace_label(entry.project_id.as_deref()).await,
+            "linkedProject": linked_project,
+            "currentBranch": entry.worktree_branch,
+            "currentExecutionRoute": execution_route.as_str(),
+            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "approvalMode": approval_mode,
+            "coordination": Self::coordination_payload(&coordination),
+            "memorySummary": coordination.durable_notes,
+            "externalActivities": Self::external_activities_payload(&coordination.external_activities),
+            "externalActivitySummary": {
+                "count": coordination.external_activities.len(),
+                "sources": source_counts,
+            },
+            "recentSessions": recent_sessions,
+        })
     }
 }
 
@@ -1018,30 +1476,10 @@ impl SessionService for LiveSessionService {
                 .as_deref()
                 .map(|p| truncate_preview(p, SESSION_PREVIEW_MAX_CHARS));
 
-            entries.push(serde_json::json!({
-                "id": e.id,
-                "key": e.key,
-                "label": e.label,
-                "model": e.model,
-                "createdAt": e.created_at,
-                "updatedAt": e.updated_at,
-                "messageCount": e.message_count,
-                "lastSeenMessageCount": e.last_seen_message_count,
-                "projectId": e.project_id,
-                "sandbox_enabled": e.sandbox_enabled,
-                "sandbox_image": e.sandbox_image,
-                "worktree_branch": e.worktree_branch,
-                "channelBinding": e.channel_binding,
-                "activeChannel": active_channel,
-                "parentSessionKey": e.parent_session_key,
-                "forkPoint": e.fork_point,
-                "mcpDisabled": e.mcp_disabled,
-                "preview": preview,
-                "agent_id": agent_id,
-                "agentId": agent_id,
-                "node_id": e.node_id,
-                "version": e.version,
-            }));
+            entries.push(
+                self.present_session_entry(&e, preview.as_deref(), active_channel, Some(agent_id))
+                    .await,
+            );
         }
         Ok(serde_json::json!(entries))
     }
@@ -1096,25 +1534,14 @@ impl SessionService for LiveSessionService {
             }
 
             return Ok(serde_json::json!({
-                "entry": {
-                    "id": entry.id,
-                    "key": entry.key,
-                    "label": entry.label,
-                    "model": entry.model,
-                    "createdAt": entry.created_at,
-                    "updatedAt": entry.updated_at,
-                    "messageCount": entry.message_count,
-                    "projectId": entry.project_id,
-                    "archived": entry.archived,
-                    "sandbox_enabled": entry.sandbox_enabled,
-                    "sandbox_image": entry.sandbox_image,
-                    "worktree_branch": entry.worktree_branch,
-                    "mcpDisabled": entry.mcp_disabled,
-                    "agent_id": entry.agent_id,
-                    "agentId": entry.agent_id,
-                    "node_id": entry.node_id,
-                    "version": entry.version,
-                },
+                "entry": self
+                    .present_session_entry(
+                        &entry,
+                        entry.preview.as_deref(),
+                        self.is_active_channel_session(&entry).await,
+                        entry.agent_id.clone(),
+                    )
+                    .await,
                 "history": [],
                 "historyTruncated": false,
                 "historyDroppedCount": 0,
@@ -1147,25 +1574,14 @@ impl SessionService for LiveSessionService {
         let (history, dropped_count) = trim_ui_history(filter_ui_history(raw_history));
 
         Ok(serde_json::json!({
-            "entry": {
-                "id": entry.id,
-                "key": entry.key,
-                "label": entry.label,
-                "model": entry.model,
-                "createdAt": entry.created_at,
-                "updatedAt": entry.updated_at,
-                "messageCount": entry.message_count,
-                "projectId": entry.project_id,
-                "archived": entry.archived,
-                "sandbox_enabled": entry.sandbox_enabled,
-                "sandbox_image": entry.sandbox_image,
-                "worktree_branch": entry.worktree_branch,
-                "mcpDisabled": entry.mcp_disabled,
-                "agent_id": entry.agent_id,
-                "agentId": entry.agent_id,
-                "node_id": entry.node_id,
-                "version": entry.version,
-            },
+            "entry": self
+                .present_session_entry(
+                    &entry,
+                    entry.preview.as_deref(),
+                    self.is_active_channel_session(&entry).await,
+                    entry.agent_id.clone(),
+                )
+                .await,
             "history": history,
             "historyTruncated": dropped_count > 0,
             "historyDroppedCount": dropped_count,
@@ -1189,7 +1605,12 @@ impl SessionService for LiveSessionService {
         }
         if let Some(project_id_opt) = p.project_id {
             let project_id = project_id_opt.filter(|s| !s.is_empty());
+            let project_binding = project_id.clone();
             self.metadata.set_project_id(key, project_id).await;
+            if project_binding.is_some() {
+                self.apply_project_machine_binding(key, project_binding.as_deref())
+                    .await;
+            }
         }
         if let Some(worktree_branch_opt) = p.worktree_branch {
             let worktree_branch = worktree_branch_opt.filter(|s| !s.is_empty());
@@ -1246,25 +1667,168 @@ impl SessionService for LiveSessionService {
                 }
             }
         }
+        if let Some(external_agent_source_opt) = p.external_agent_source {
+            let normalized_source = external_agent_source_opt
+                .map(|source| normalize_session_source(Some(source)))
+                .and_then(|source| (source != ExternalAgentSource::Native).then_some(source));
+            let _ = self
+                .metadata
+                .set_external_agent_source(key, normalized_source)
+                .await;
+        }
 
         let entry = self
             .metadata
             .get(key)
             .await
             .ok_or_else(|| format!("session '{key}' not found after update"))?;
+        Ok(self
+            .present_session_entry(
+                &entry,
+                entry.preview.as_deref(),
+                self.is_active_channel_session(&entry).await,
+                entry.agent_id.clone(),
+            )
+            .await)
+    }
+
+    async fn workspace_overview(&self, params: Value) -> ServiceResult {
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+        let entry = self
+            .metadata
+            .get(key)
+            .await
+            .ok_or_else(|| format!("session '{key}' not found"))?;
+        Ok(self.workspace_overview_for_entry(&entry).await)
+    }
+
+    async fn coordination_set(&self, params: Value) -> ServiceResult {
+        let p: CoordinationSetParams = parse_params(params)?;
+        let entry = self
+            .metadata
+            .get(&p.key)
+            .await
+            .ok_or_else(|| format!("session '{}' not found", p.key))?;
+        let store = self
+            .state_store
+            .as_ref()
+            .ok_or_else(|| "session coordinator state store not configured".to_string())?;
+        let key = p.key.clone();
+        let updated = coordinator::apply_patch(store, &key, CoordinationPatch::from(p))
+            .await
+            .map_err(ServiceError::message)?;
+
         Ok(serde_json::json!({
-            "id": entry.id,
-            "key": entry.key,
-            "label": entry.label,
-            "model": entry.model,
-            "sandbox_enabled": entry.sandbox_enabled,
-            "sandbox_image": entry.sandbox_image,
-            "worktree_branch": entry.worktree_branch,
-            "mcpDisabled": entry.mcp_disabled,
-            "agent_id": entry.agent_id,
-            "agentId": entry.agent_id,
-            "node_id": entry.node_id,
-            "version": entry.version,
+            "coordination": Self::coordination_payload(&updated),
+            "workspaceOverview": self.workspace_overview_for_entry(&entry).await,
+        }))
+    }
+
+    async fn external_attach(&self, params: Value) -> ServiceResult {
+        let p: ExternalAttachParams = parse_params(params)?;
+        let summary = p.summary.trim();
+        if summary.is_empty() {
+            return Err("missing 'summary' parameter".into());
+        }
+
+        let store = self
+            .state_store
+            .as_ref()
+            .ok_or_else(|| "session coordinator state store not configured".to_string())?;
+        if self.metadata.get(&p.key).await.is_none() {
+            return Err(format!("session '{}' not found", p.key).into());
+        }
+
+        let coordination_patch = CoordinationPatch {
+            decision: p.decision,
+            current_plan: p.current_plan,
+            next_action: p.next_action,
+            route_constraints: p.route_constraints,
+            durable_notes: p.durable_notes,
+        };
+        let _ = coordinator::apply_patch(store, &p.key, coordination_patch)
+            .await
+            .map_err(ServiceError::message)?;
+
+        let updated = coordinator::append_external_activity(store, &p.key, ExternalActivity {
+            id: String::new(),
+            source: p.source,
+            title: p.title.clone(),
+            summary: summary.to_string(),
+            link: p.link.clone(),
+            attached_at: 0,
+            imported_session_key: p.imported_session_key.clone(),
+            imported_message_count: p.imported_message_count,
+        })
+        .await
+        .map_err(ServiceError::message)?;
+
+        let persisted_source = (p.source != ExternalAgentSource::Native).then_some(p.source);
+        let _ = self
+            .metadata
+            .set_external_agent_source(&p.key, persisted_source)
+            .await;
+
+        let mut notice = format!(
+            "{EXTERNAL_ACTIVITY_NOTICE_PREFIX} from {}",
+            external_source_display_name(p.source)
+        );
+        if let Some(title) = p
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            notice.push_str(&format!(": {title}"));
+        }
+        notice.push_str("\n\n");
+        notice.push_str(summary);
+        if let Some(link) = p
+            .link
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            notice.push_str(&format!("\n\nLink: {link}"));
+        }
+        let notice_message = PersistedMessage::Notice {
+            content: notice,
+            created_at: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            ),
+        };
+        self.store
+            .append(&p.key, &notice_message.to_value())
+            .await
+            .map_err(ServiceError::message)?;
+        let message_count = self
+            .store
+            .count(&p.key)
+            .await
+            .map_err(ServiceError::message)?;
+        self.metadata.touch(&p.key, message_count).await;
+        let entry = self
+            .metadata
+            .get(&p.key)
+            .await
+            .ok_or_else(|| format!("session '{}' not found after attach", p.key))?;
+
+        let activity = updated
+            .external_activities
+            .first()
+            .cloned()
+            .ok_or_else(|| ServiceError::message("external activity did not persist correctly"))?;
+
+        Ok(serde_json::json!({
+            "activity": Self::external_activities_payload(&[activity]).into_iter().next().unwrap_or(Value::Null),
+            "coordination": Self::coordination_payload(&updated),
+            "workspaceOverview": self.workspace_overview_for_entry(&entry).await,
         }))
     }
 
@@ -1707,6 +2271,12 @@ impl SessionService for LiveSessionService {
                     .set_node_id(&new_key, parent.node_id.as_deref())
                     .await;
             }
+            if parent.external_agent_source.is_some() {
+                let _ = self
+                    .metadata
+                    .set_external_agent_source(&new_key, parent.external_agent_source)
+                    .await;
+            }
         } else {
             let default_agent = self.default_agent_id().await;
             let _ = self
@@ -1730,17 +2300,18 @@ impl SessionService for LiveSessionService {
             .get(&new_key)
             .await
             .ok_or_else(|| format!("forked session '{new_key}' not found after creation"))?;
-        Ok(serde_json::json!({
-            "sessionKey": new_key,
-            "id": final_entry.id,
-            "label": final_entry.label,
-            "forkPoint": fork_point,
-            "messageCount": fork_point,
-            "agent_id": final_entry.agent_id,
-            "agentId": final_entry.agent_id,
-            "node_id": final_entry.node_id,
-            "version": final_entry.version,
-        }))
+        let mut payload = self
+            .present_session_entry(
+                &final_entry,
+                final_entry.preview.as_deref(),
+                self.is_active_channel_session(&final_entry).await,
+                final_entry.agent_id.clone(),
+            )
+            .await;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("sessionKey".to_string(), serde_json::json!(new_key));
+        }
+        Ok(payload)
     }
 
     async fn branches(&self, params: Value) -> ServiceResult {
@@ -1888,7 +2459,9 @@ impl SessionService for LiveSessionService {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use {super::*, std::sync::Arc};
+
+    use moltis_projects::{ProjectStore, SqliteProjectStore, store::new_project};
 
     #[test]
     fn filter_ui_history_removes_empty_assistant_messages() {
@@ -2712,6 +3285,19 @@ mod tests {
         // Projects table must exist before sessions (FK constraint).
         moltis_projects::run_migrations(&pool).await.unwrap();
         SqliteSessionMetadata::init(&pool).await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS session_state (
+                session_key TEXT NOT NULL,
+                namespace   TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (session_key, namespace, key)
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -2855,6 +3441,143 @@ mod tests {
         assert!(
             content.contains("cleared"),
             "notification should mention cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_sets_external_agent_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "externalAgentSource": "codex",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["externalAgentSource"], "codex");
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(
+            entry.external_agent_source,
+            Some(ExternalAgentSource::Codex)
+        );
+    }
+
+    #[tokio::test]
+    async fn external_attach_persists_activity_and_appends_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let state_store = Arc::new(SessionStateStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata))
+            .with_state_store(Arc::clone(&state_store));
+        let result = svc
+            .external_attach(serde_json::json!({
+                "key": "main",
+                "source": "claude_code",
+                "title": "Review auth middleware",
+                "summary": "Attached a Claude Code run summary.",
+                "nextAction": "Apply the auth hardening patch",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["activity"]["source"], "claude_code");
+        assert_eq!(
+            result["coordination"]["nextAction"],
+            "Apply the auth hardening patch"
+        );
+        let msgs = store.read("main").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "notice");
+        assert!(
+            msgs[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Claude Code"))
+        );
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(
+            entry.external_agent_source,
+            Some(ExternalAgentSource::ClaudeCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_project_binding_applies_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some(crate::machine::SANDBOX_MACHINE_ID.to_string());
+        project_store.upsert(project).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "projectId": "ops",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["workspace"], "ops");
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.project_id.as_deref(), Some("ops"));
+        assert_eq!(entry.sandbox_enabled, Some(true));
+        assert_eq!(entry.node_id, None);
+    }
+
+    #[tokio::test]
+    async fn workspace_overview_includes_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some("node-build".into());
+        project_store.upsert(project).await.unwrap();
+        metadata
+            .set_project_id("main", Some("ops".to_string()))
+            .await;
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let overview = svc
+            .workspace_overview(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            overview["linkedProject"]["preferredMachineId"],
+            "node-build"
+        );
+        assert_eq!(
+            overview["linkedProject"]["preferredMachine"]["id"],
+            "node-build"
+        );
+        assert_eq!(
+            overview["linkedProject"]["preferredMachine"]["kind"],
+            "node"
         );
     }
 }

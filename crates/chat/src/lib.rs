@@ -38,8 +38,10 @@ use {
     moltis_providers::{ProviderRegistry, raw_model_id},
     moltis_sessions::{
         ContentBlock, MessageContent, PersistedMessage,
+        coordinator::{self, CoordinationState},
         message::{PersistedFunction, PersistedToolCall},
-        metadata::{SessionEntry, SqliteSessionMetadata},
+        metadata::{ExternalAgentSource, SessionEntry, SqliteSessionMetadata},
+        state_store::SessionStateStore,
         store::SessionStore,
     },
     moltis_skills::discover::SkillDiscoverer,
@@ -1132,6 +1134,158 @@ fn resolve_channel_runtime_context(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionRoute {
+    Local,
+    Sandbox,
+    Ssh,
+    Node,
+}
+
+impl ExecutionRoute {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Sandbox => "sandbox",
+            Self::Ssh => "ssh",
+            Self::Node => "node",
+        }
+    }
+}
+
+fn normalize_external_agent_source(source: Option<ExternalAgentSource>) -> ExternalAgentSource {
+    source.unwrap_or(ExternalAgentSource::Native)
+}
+
+async fn effective_execution_route(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    session_entry: Option<&SessionEntry>,
+) -> ExecutionRoute {
+    if let Some(node_id) = session_entry.and_then(|entry| entry.node_id.as_deref()) {
+        return if node_id.starts_with("ssh:") {
+            ExecutionRoute::Ssh
+        } else {
+            ExecutionRoute::Node
+        };
+    }
+
+    if let Some(router) = state.sandbox_router() {
+        if router.is_sandboxed(session_key).await {
+            return ExecutionRoute::Sandbox;
+        }
+    } else if session_entry.and_then(|entry| entry.sandbox_enabled) == Some(true) {
+        return ExecutionRoute::Sandbox;
+    }
+
+    ExecutionRoute::Local
+}
+
+fn machine_payload(
+    route: ExecutionRoute,
+    session_entry: Option<&SessionEntry>,
+    sandbox_available: bool,
+) -> Value {
+    let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
+    match route {
+        ExecutionRoute::Local => serde_json::json!({
+            "id": "local",
+            "kind": "local",
+            "route": "local",
+            "executionRoute": "local",
+            "label": "Local host",
+            "nodeId": Value::Null,
+            "trustState": "trusted_local",
+            "health": "ready",
+            "available": true,
+        }),
+        ExecutionRoute::Sandbox => serde_json::json!({
+            "id": "sandbox",
+            "kind": "sandbox",
+            "route": "sandbox",
+            "executionRoute": "sandbox",
+            "label": "Sandbox",
+            "nodeId": Value::Null,
+            "trustState": "sandboxed",
+            "health": if sandbox_available { "ready" } else { "unavailable" },
+            "available": sandbox_available,
+        }),
+        ExecutionRoute::Ssh => serde_json::json!({
+            "id": node_id.unwrap_or("ssh:unresolved"),
+            "kind": "ssh",
+            "route": "ssh",
+            "executionRoute": "ssh",
+            "label": "SSH target",
+            "nodeId": node_id,
+            "trustState": "managed_ssh",
+            "health": if node_id.is_some() { "ready" } else { "unavailable" },
+            "available": node_id.is_some(),
+        }),
+        ExecutionRoute::Node => serde_json::json!({
+            "id": node_id.unwrap_or("node:unresolved"),
+            "kind": "node",
+            "route": "node",
+            "executionRoute": "node",
+            "label": "Paired node",
+            "nodeId": node_id,
+            "trustState": "paired_node",
+            "health": if node_id.is_some() { "ready" } else { "unavailable" },
+            "available": node_id.is_some(),
+        }),
+    }
+}
+
+async fn load_coordination_state(
+    state_store: Option<&Arc<SessionStateStore>>,
+    session_key: &str,
+) -> CoordinationState {
+    let Some(state_store) = state_store else {
+        return CoordinationState::default();
+    };
+    coordinator::load(state_store, session_key)
+        .await
+        .unwrap_or_default()
+}
+
+fn coordinator_prompt_section(coordination: &CoordinationState) -> Option<String> {
+    if coordination.decision.is_none()
+        && coordination.current_plan.is_none()
+        && coordination.next_action.is_none()
+        && coordination.route_constraints.is_none()
+        && coordination.external_activities.is_empty()
+    {
+        return None;
+    }
+
+    let mut section = String::from("## Session Coordination\n\n");
+    if let Some(ref decision) = coordination.decision {
+        section.push_str(&format!("- Decision: {decision}\n"));
+    }
+    if let Some(ref current_plan) = coordination.current_plan {
+        section.push_str(&format!("- Current plan: {current_plan}\n"));
+    }
+    if let Some(ref next_action) = coordination.next_action {
+        section.push_str(&format!("- Next action: {next_action}\n"));
+    }
+    if let Some(ref route_constraints) = coordination.route_constraints {
+        section.push_str(&format!("- Route/tool constraints: {route_constraints}\n"));
+    }
+    if !coordination.external_activities.is_empty() {
+        let latest = &coordination.external_activities[0];
+        let latest_title = latest
+            .title
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("attached work");
+        section.push_str(&format!(
+            "- Latest external activity: {} ({})\n",
+            latest_title,
+            latest.source.as_str()
+        ));
+    }
+    Some(section)
+}
+
 async fn build_prompt_runtime_context(
     state: &Arc<dyn ChatRuntime>,
     provider: &Arc<dyn moltis_agents::model::LlmProvider>,
@@ -1188,6 +1342,11 @@ async fn build_prompt_runtime_context(
         .as_ref()
         .map(|loc| loc.to_string());
     let channel_context = resolve_channel_runtime_context(session_key, session_entry);
+    let execution_route = effective_execution_route(state, session_key, session_entry).await;
+    let workspace = session_entry.and_then(|entry| entry.project_id.clone());
+    let external_agent_source = normalize_external_agent_source(
+        session_entry.and_then(|entry| entry.external_agent_source),
+    );
 
     let mut host_ctx = PromptHostRuntimeContext {
         host: Some(state.hostname().to_string()),
@@ -1204,6 +1363,9 @@ async fn build_prompt_runtime_context(
         channel_account_id: channel_context.channel_account_id,
         channel_chat_id: channel_context.channel_chat_id,
         channel_chat_type: channel_context.channel_chat_type,
+        workspace,
+        execution_route: Some(execution_route.as_str().to_string()),
+        external_agent_source: Some(external_agent_source.as_str().to_string()),
         data_dir: Some(data_dir_display),
         sudo_non_interactive,
         sudo_status,
@@ -2454,6 +2616,7 @@ pub struct LiveChatService {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     session_store: Arc<SessionStore>,
     session_metadata: Arc<SqliteSessionMetadata>,
+    state_store: Option<Arc<SessionStateStore>>,
     hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
     /// Per-session semaphore ensuring only one agent run executes per session at a time.
     session_locks: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
@@ -2495,6 +2658,7 @@ impl LiveChatService {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new())),
             session_store,
             session_metadata,
+            state_store: None,
             hook_registry: None,
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             message_queue: Arc::new(RwLock::new(HashMap::new())),
@@ -2524,6 +2688,11 @@ impl LiveChatService {
 
     pub fn with_hooks_arc(mut self, registry: Arc<moltis_common::hooks::HookRegistry>) -> Self {
         self.hook_registry = Some(registry);
+        self
+    }
+
+    pub fn with_state_store(mut self, store: Arc<SessionStateStore>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -2766,7 +2935,13 @@ impl LiveChatService {
             context_files: files,
             worktree_dir,
         };
-        Some(ctx.to_prompt_section())
+        let mut section = ctx.to_prompt_section();
+        let coordination = load_coordination_state(self.state_store.as_ref(), session_key).await;
+        if let Some(coordination_section) = coordinator_prompt_section(&coordination) {
+            section.push('\n');
+            section.push_str(&coordination_section);
+        }
+        Some(section)
     }
 }
 
@@ -4488,6 +4663,19 @@ impl ChatService for LiveChatService {
                 )
             }
         };
+        let execution_route =
+            effective_execution_route(&self.state, &session_key, session_entry.as_ref()).await;
+        let current_machine = machine_payload(
+            execution_route,
+            session_entry.as_ref(),
+            self.state.sandbox_router().is_some(),
+        );
+        let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
+        let external_agent_source = normalize_external_agent_source(
+            session_entry
+                .as_ref()
+                .and_then(|entry| entry.external_agent_source),
+        );
         let session_info = serde_json::json!({
             "key": session_key,
             "messageCount": message_count,
@@ -4495,6 +4683,12 @@ impl ChatService for LiveChatService {
             "provider": provider_name,
             "label": session_entry.as_ref().and_then(|e| e.label.as_deref()),
             "projectId": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
+            "workspace": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
+            "surface": surface_ctx.surface,
+            "sessionKind": surface_ctx.session_kind,
+            "executionRoute": execution_route.as_str(),
+            "machine": current_machine,
+            "externalAgentSource": external_agent_source.as_str(),
         });
 
         // Project info & context files
@@ -4548,6 +4742,35 @@ impl ChatService for LiveChatService {
         } else {
             serde_json::json!(null)
         };
+        let coordination = load_coordination_state(self.state_store.as_ref(), &session_key).await;
+        let recent_sessions = if let Some(project_id) = session_entry
+            .as_ref()
+            .and_then(|entry| entry.project_id.as_deref())
+        {
+            let mut sessions = Vec::new();
+            for entry in self
+                .session_metadata
+                .list()
+                .await
+                .into_iter()
+                .filter(|entry| entry.project_id.as_deref() == Some(project_id))
+                .take(6)
+            {
+                let route = effective_execution_route(&self.state, &entry.key, Some(&entry)).await;
+                sessions.push(serde_json::json!({
+                    "key": entry.key,
+                    "label": entry.label,
+                    "updatedAt": entry.updated_at,
+                    "messageCount": entry.message_count,
+                    "executionRoute": route.as_str(),
+                    "externalAgentSource": normalize_external_agent_source(entry.external_agent_source).as_str(),
+                }));
+            }
+            sessions
+        } else {
+            Vec::new()
+        };
+        let workspace_linked_project = project_info.clone();
 
         // Tools (only include if the provider supports tool calling)
         let mcp_disabled = session_entry
@@ -4650,6 +4873,7 @@ impl ChatService for LiveChatService {
         });
         let execution_info = serde_json::json!({
             "mode": if sandbox_enabled { "sandbox" } else { "host" },
+            "route": execution_route.as_str(),
             "hostIsRoot": host_is_root,
             "isRoot": exec_is_root,
             "promptSymbol": exec_prompt_symbol,
@@ -4690,6 +4914,38 @@ impl ChatService for LiveChatService {
         Ok(serde_json::json!({
             "session": session_info,
             "project": project_info,
+            "workspaceOverview": {
+                "workspaceId": session_entry.as_ref().and_then(|entry| entry.project_id.as_deref()),
+                "workspaceLabel": workspace_linked_project.get("label"),
+                "linkedProject": workspace_linked_project,
+                "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
+                "currentExecutionRoute": execution_route.as_str(),
+                "machine": machine_payload(
+                    execution_route,
+                    session_entry.as_ref(),
+                    self.state.sandbox_router().is_some(),
+                ),
+                "approvalMode": config.tools.exec.approval_mode,
+                "coordination": {
+                    "decision": coordination.decision,
+                    "currentPlan": coordination.current_plan,
+                    "nextAction": coordination.next_action,
+                    "routeConstraints": coordination.route_constraints,
+                    "durableNotes": coordination.durable_notes,
+                },
+                "memorySummary": coordination.durable_notes,
+                "externalActivities": coordination.external_activities.iter().map(|activity| serde_json::json!({
+                    "id": activity.id,
+                    "source": activity.source.as_str(),
+                    "title": activity.title,
+                    "summary": activity.summary,
+                    "link": activity.link,
+                    "attachedAt": activity.attached_at,
+                    "importedSessionKey": activity.imported_session_key,
+                    "importedMessageCount": activity.imported_message_count,
+                })).collect::<Vec<_>>(),
+                "recentSessions": recent_sessions,
+            },
             "tools": tools,
             "skills": skills_list,
             "mcpServers": mcp_servers,

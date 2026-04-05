@@ -5,6 +5,7 @@
 //! with file locking for concurrent access.
 
 pub mod compaction;
+pub mod coordinator;
 pub mod error;
 pub mod key;
 pub mod message;

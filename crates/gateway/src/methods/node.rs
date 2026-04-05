@@ -1,23 +1,18 @@
 use std::time::Duration;
 
-use moltis_protocol::{ErrorShape, error_codes};
+use {
+    crate::state::GatewayState,
+    moltis_projects::Project,
+    moltis_protocol::{ErrorShape, error_codes},
+};
 
 use crate::{
     auth::{SshAuthMode, SshResolvedTarget, SshTargetEntry},
     broadcast::{BroadcastOpts, broadcast},
+    machine::{LOCAL_MACHINE_ID, MachineDescriptor, SANDBOX_MACHINE_ID},
 };
 
 use super::MethodRegistry;
-
-fn configured_legacy_ssh_target() -> Option<String> {
-    let config = moltis_config::discover_and_load();
-    config
-        .tools
-        .exec
-        .ssh_target
-        .map(|target| target.trim().to_string())
-        .filter(|target| !target.is_empty())
-}
 
 fn ssh_summary_json(target: &str) -> serde_json::Value {
     serde_json::json!({
@@ -135,7 +130,223 @@ fn ssh_target_detail_json(target: &SshResolvedTarget) -> serde_json::Value {
     })
 }
 
+fn now_ms() -> u64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64
+}
+
+async fn persist_project_machine_binding(
+    state: &std::sync::Arc<GatewayState>,
+    session_key: &str,
+    machine_id: &str,
+) {
+    let Some(ref meta) = state.services.session_metadata else {
+        return;
+    };
+    let Some(entry) = meta.get(session_key).await else {
+        return;
+    };
+    let Some(project_id) = entry.project_id else {
+        return;
+    };
+
+    let project_value = match state
+        .services
+        .project
+        .get(serde_json::json!({ "id": project_id }))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(session_key, %error, "failed to load project for machine binding");
+            return;
+        },
+    };
+    let Some(mut project) = serde_json::from_value::<Option<Project>>(project_value)
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+
+    if project.preferred_machine_id.as_deref() == Some(machine_id) {
+        return;
+    }
+
+    project.preferred_machine_id = Some(machine_id.to_string());
+    project.updated_at = now_ms();
+    let payload = match serde_json::to_value(&project) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(project_id = %project.id, %error, "failed to serialize project update");
+            return;
+        },
+    };
+    if let Err(error) = state.services.project.upsert(payload).await {
+        tracing::warn!(project_id = %project.id, %error, "failed to persist project machine binding");
+    }
+}
+
 pub(super) fn register(reg: &mut MethodRegistry) {
+    reg.register(
+        "machines.list",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                Ok(
+                    serde_json::to_value(crate::machine::list_machines(&ctx.state).await)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                )
+            })
+        }),
+    );
+
+    reg.register(
+        "machines.get",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let machine_id = ctx
+                    .params
+                    .get("machineId")
+                    .or_else(|| ctx.params.get("machine_id"))
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, "missing machineId")
+                    })?;
+                crate::machine::resolve_machine(&ctx.state, machine_id)
+                    .await
+                    .map(|machine| serde_json::to_value(machine).unwrap_or(serde_json::Value::Null))
+                    .ok_or_else(|| {
+                        ErrorShape::new(
+                            error_codes::INVALID_REQUEST,
+                            format!("machine '{machine_id}' not found"),
+                        )
+                    })
+            })
+        }),
+    );
+
+    reg.register(
+        "machines.set_session",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let session_key = ctx
+                    .params
+                    .get("session_key")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ErrorShape::new(
+                            error_codes::INVALID_REQUEST,
+                            "missing 'session_key' parameter",
+                        )
+                    })?;
+                let machine_id = ctx
+                    .params
+                    .get("machineId")
+                    .or_else(|| ctx.params.get("machine_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(LOCAL_MACHINE_ID);
+
+                let Some(ref meta) = ctx.state.services.session_metadata else {
+                    return Err(ErrorShape::new(
+                        error_codes::UNAVAILABLE,
+                        "session metadata not available",
+                    ));
+                };
+                meta.upsert(session_key, None)
+                    .await
+                    .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+
+                let machine = match machine_id {
+                    LOCAL_MACHINE_ID => {
+                        meta.set_node_id(session_key, None)
+                            .await
+                            .map_err(|e| {
+                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                            })?;
+                        meta.set_sandbox_enabled(session_key, Some(false)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, false).await;
+                        }
+                        MachineDescriptor::local()
+                    },
+                    SANDBOX_MACHINE_ID => {
+                        if !crate::machine::sandbox_machine_available(&ctx.state) {
+                            return Err(ErrorShape::new(
+                                error_codes::INVALID_REQUEST,
+                                "sandbox machine is not available",
+                            ));
+                        }
+                        meta.set_node_id(session_key, None)
+                            .await
+                            .map_err(|e| {
+                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                            })?;
+                        meta.set_sandbox_enabled(session_key, Some(true)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, true).await;
+                        }
+                        MachineDescriptor::sandbox(true)
+                    },
+                    _ => {
+                        let resolved = crate::machine::resolve_machine(&ctx.state, machine_id)
+                            .await
+                            .ok_or_else(|| {
+                                ErrorShape::new(
+                                    error_codes::INVALID_REQUEST,
+                                    format!("machine '{machine_id}' not found"),
+                                )
+                            })?;
+                        meta.set_node_id(session_key, Some(&resolved.id))
+                            .await
+                            .map_err(|e| {
+                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                            })?;
+                        meta.set_sandbox_enabled(session_key, Some(false)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, false).await;
+                        }
+                        resolved
+                    },
+                };
+                persist_project_machine_binding(&ctx.state, session_key, &machine.id).await;
+
+                broadcast(
+                    &ctx.state,
+                    "session",
+                    serde_json::json!({
+                        "kind": "patched",
+                        "sessionKey": session_key,
+                    }),
+                    BroadcastOpts::default(),
+                )
+                .await;
+                broadcast(
+                    &ctx.state,
+                    "chat",
+                    serde_json::json!({
+                        "sessionKey": session_key,
+                        "state": "notice",
+                        "title": "Execution Machine",
+                        "message": format!("Execution machine set to {}.", machine.label),
+                    }),
+                    BroadcastOpts::default(),
+                )
+                .await;
+
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "machine": machine,
+                    "machineId": machine.id,
+                    "node_id": if machine.kind.as_str() == "local" || machine.kind.as_str() == "sandbox" {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(machine.node_id)
+                    },
+                    "sandbox_enabled": machine.kind.as_str() == "sandbox",
+                }))
+            })
+        }),
+    );
+
     // node.list
     reg.register(
         "node.list",
@@ -189,7 +400,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         Err(error) => tracing::warn!(%error, "failed to list managed ssh targets"),
                     }
                 }
-                if let Some(target) = configured_legacy_ssh_target() {
+                if let Some(target) = crate::machine::configured_legacy_ssh_target() {
                     list.push(ssh_summary_json(&target));
                 }
                 Ok(serde_json::json!(list))
@@ -218,7 +429,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         },
                     }
                 }
-                if let Some(target) = configured_legacy_ssh_target()
+                if let Some(target) = crate::machine::configured_legacy_ssh_target()
                     && crate::node_exec::ssh_target_matches(node_id, &target)
                 {
                     return Ok(ssh_detail_json(&target));
@@ -318,7 +529,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?
                     {
                         Some(target.node_id)
-                    } else if let Some(target) = configured_legacy_ssh_target()
+                    } else if let Some(target) = crate::machine::configured_legacy_ssh_target()
                         && crate::node_exec::ssh_target_matches(nid, &target)
                     {
                         Some(crate::node_exec::ssh_node_id(&target))
@@ -348,6 +559,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 meta.set_node_id(session_key, resolved_node_id.as_deref())
                     .await
                     .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                persist_project_machine_binding(
+                    &ctx.state,
+                    session_key,
+                    resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
+                )
+                .await;
                 Ok(serde_json::json!({ "ok": true, "node_id": resolved_node_id }))
             })
         }),
@@ -629,4 +846,332 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             })
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Instant};
+
+    use {
+        moltis_projects::{ProjectStore, SqliteProjectStore, store::new_project},
+        moltis_sessions::metadata::SqliteSessionMetadata,
+        moltis_tools::sandbox::{NoSandbox, RestrictedHostSandbox, SandboxConfig, SandboxRouter},
+    };
+
+    use {
+        super::super::{MethodContext, MethodRegistry},
+        crate::{
+            auth::{AuthMode, ResolvedAuth},
+            nodes::NodeSession,
+            project::LiveProjectService,
+            services::GatewayServices,
+            state::GatewayState,
+        },
+    };
+
+    async fn sqlite_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        moltis_projects::run_migrations(&pool)
+            .await
+            .expect("project migrations");
+        SqliteSessionMetadata::init(&pool)
+            .await
+            .expect("session metadata init");
+        pool
+    }
+
+    fn test_state_with_router(
+        metadata: Arc<SqliteSessionMetadata>,
+        project_service: Option<Arc<dyn crate::services::ProjectService>>,
+        sandbox_router: Option<Arc<SandboxRouter>>,
+    ) -> Arc<GatewayState> {
+        let mut services = GatewayServices::noop().with_session_metadata(metadata);
+        if let Some(project) = project_service {
+            services = services.with_project(project);
+        }
+        GatewayState::with_options(
+            ResolvedAuth {
+                mode: AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+            sandbox_router,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            18789,
+            false,
+            None,
+            None,
+            #[cfg(feature = "metrics")]
+            None,
+            #[cfg(feature = "metrics")]
+            None,
+            #[cfg(feature = "vault")]
+            None,
+        )
+    }
+
+    fn test_state(
+        metadata: Arc<SqliteSessionMetadata>,
+        project_service: Option<Arc<dyn crate::services::ProjectService>>,
+    ) -> Arc<GatewayState> {
+        test_state_with_router(metadata, project_service, None)
+    }
+
+    fn operator_scopes(scope: &str) -> Vec<String> {
+        vec![scope.to_string()]
+    }
+
+    fn test_node(node_id: &str, label: &str) -> NodeSession {
+        NodeSession {
+            node_id: node_id.to_string(),
+            conn_id: format!("conn-{node_id}"),
+            display_name: Some(label.to_string()),
+            platform: "linux".to_string(),
+            version: "1.0.0".to_string(),
+            capabilities: vec!["system.run".to_string()],
+            commands: vec!["system.run".to_string()],
+            permissions: HashMap::new(),
+            path_env: None,
+            remote_ip: Some("10.0.0.5".to_string()),
+            connected_at: Instant::now(),
+            mem_total: None,
+            mem_available: None,
+            cpu_count: None,
+            cpu_usage: None,
+            uptime_secs: None,
+            services: Vec::new(),
+            last_telemetry: Some(Instant::now()),
+            disk_total: None,
+            disk_available: None,
+            runtimes: Vec::new(),
+            providers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn machines_list_includes_local_and_connected_nodes() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let state = test_state(metadata, None);
+        {
+            let mut inner = state.inner.write().await;
+            inner.nodes.register(test_node("node-z", "Zeta"));
+            inner.nodes.register(test_node("node-a", "Alpha"));
+        }
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-1".into(),
+                method: "machines.list".into(),
+                params: serde_json::json!({}),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.read"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.list should succeed");
+        let payload = response.payload.expect("payload");
+        let ids = payload
+            .as_array()
+            .expect("machine list")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(ids.first().copied(), Some("local"));
+        assert!(ids.contains(&"node-a"));
+        assert!(ids.contains(&"node-z"));
+
+        let labels = payload
+            .as_array()
+            .expect("machine list")
+            .iter()
+            .filter(|item| item.get("kind").and_then(|value| value.as_str()) == Some("node"))
+            .filter_map(|item| item.get("label").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["Alpha", "Zeta"]);
+    }
+
+    #[tokio::test]
+    async fn machines_set_session_updates_session_binding() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        metadata.upsert("main", None).await.expect("upsert session");
+        let state = test_state(Arc::clone(&metadata), None);
+        {
+            let mut inner = state.inner.write().await;
+            inner.nodes.register(test_node("node-build", "Build box"));
+        }
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-2".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "node-build",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.set_session should succeed");
+        let payload = response.payload.expect("payload");
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["machine"]["id"], "node-build");
+        assert_eq!(payload["machine"]["kind"], "node");
+        assert_eq!(payload["node_id"], "node-build");
+        assert_eq!(payload["sandbox_enabled"], false);
+
+        let entry = metadata.get("main").await.expect("session entry");
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn machines_set_session_updates_sandbox_router_override() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        metadata.upsert("main", None).await.expect("upsert session");
+        let config = SandboxConfig::default();
+        let router = Arc::new(SandboxRouter::with_backend(
+            config.clone(),
+            Arc::new(RestrictedHostSandbox::new(config)),
+        ));
+        let state = test_state_with_router(Arc::clone(&metadata), None, Some(Arc::clone(&router)));
+
+        let reg = MethodRegistry::new();
+        let sandbox_response = reg
+            .dispatch(MethodContext {
+                request_id: "req-sandbox".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "sandbox",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state: Arc::clone(&state),
+                channel: None,
+            })
+            .await;
+
+        assert!(sandbox_response.ok, "sandbox machine switch should succeed");
+        assert!(router.is_sandboxed("main").await);
+
+        let local_response = reg
+            .dispatch(MethodContext {
+                request_id: "req-local".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "local",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(local_response.ok, "local machine switch should succeed");
+        assert!(!router.is_sandboxed("main").await);
+    }
+
+    #[tokio::test]
+    async fn machines_list_marks_sandbox_unavailable_without_real_backend() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let config = SandboxConfig::default();
+        let router = Arc::new(SandboxRouter::with_backend(config, Arc::new(NoSandbox)));
+        let state = test_state_with_router(metadata, None, Some(router));
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-sandbox-list".into(),
+                method: "machines.list".into(),
+                params: serde_json::json!({}),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.read"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.list should succeed");
+        let payload = response.payload.expect("payload");
+        let sandbox = payload
+            .as_array()
+            .expect("machine list")
+            .iter()
+            .find(|item| item.get("id").and_then(|value| value.as_str()) == Some("sandbox"))
+            .expect("sandbox machine present");
+        assert_eq!(sandbox["available"], false);
+        assert_eq!(sandbox["health"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn machines_set_session_persists_workspace_preferred_machine() {
+        let pool = sqlite_pool().await;
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool.clone()));
+        let project_service = Arc::new(LiveProjectService::new(Arc::clone(&project_store)))
+            as Arc<dyn crate::services::ProjectService>;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.expect("upsert session");
+        project_store
+            .upsert(new_project("ops".into(), "Ops".into(), "/tmp/ops".into()))
+            .await
+            .expect("upsert project");
+        metadata
+            .set_project_id("main", Some("ops".to_string()))
+            .await;
+
+        let state = test_state(Arc::clone(&metadata), Some(project_service));
+        {
+            let mut inner = state.inner.write().await;
+            inner.nodes.register(test_node("node-ops", "Ops box"));
+        }
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-3".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "node-ops",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.set_session should succeed");
+        let project = project_store
+            .get("ops")
+            .await
+            .expect("get project")
+            .expect("project");
+        assert_eq!(project.preferred_machine_id.as_deref(), Some("node-ops"));
+    }
 }

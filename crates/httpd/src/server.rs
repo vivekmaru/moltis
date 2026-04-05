@@ -1287,6 +1287,90 @@ pub async fn prepare_gateway(
                                     truncated
                                 }
                             });
+                            let surface = if entry.key == "cron:heartbeat" {
+                                "heartbeat".to_string()
+                            } else if entry.key.starts_with("cron:") {
+                                "cron".to_string()
+                            } else if let Some(binding_json) = entry.channel_binding.as_deref() {
+                                serde_json::from_str::<moltis_channels::ChannelReplyTarget>(
+                                    binding_json,
+                                )
+                                .map(|binding| binding.channel_type.as_str().to_string())
+                                .unwrap_or_else(|_| "web".to_string())
+                            } else {
+                                "web".to_string()
+                            };
+                            let session_kind = if entry.key.starts_with("cron:") {
+                                "cron"
+                            } else if entry.channel_binding.is_some() {
+                                "channel"
+                            } else {
+                                "web"
+                            };
+                            let execution_route = if let Some(node_id) = entry.node_id.as_deref() {
+                                if node_id.starts_with("ssh:") {
+                                    "ssh"
+                                } else {
+                                    "node"
+                                }
+                            } else if let Some(router) = ws_state.sandbox_router.as_ref() {
+                                if router.is_sandboxed(&entry.key).await {
+                                    "sandbox"
+                                } else {
+                                    "local"
+                                }
+                            } else if entry.sandbox_enabled == Some(true) {
+                                "sandbox"
+                            } else {
+                                "local"
+                            };
+                            let sandbox_available = ws_state.sandbox_router.is_some();
+                            let machine = match execution_route {
+                                "sandbox" => serde_json::json!({
+                                    "id": "sandbox",
+                                    "kind": "sandbox",
+                                    "route": "sandbox",
+                                    "executionRoute": "sandbox",
+                                    "label": "Sandbox",
+                                    "nodeId": serde_json::Value::Null,
+                                    "trustState": "sandboxed",
+                                    "health": if sandbox_available { "ready" } else { "unavailable" },
+                                    "available": sandbox_available,
+                                }),
+                                "ssh" => serde_json::json!({
+                                    "id": entry.node_id.clone().unwrap_or_else(|| "ssh:unresolved".to_string()),
+                                    "kind": "ssh",
+                                    "route": "ssh",
+                                    "executionRoute": "ssh",
+                                    "label": "SSH target",
+                                    "nodeId": entry.node_id,
+                                    "trustState": "managed_ssh",
+                                    "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+                                    "available": entry.node_id.is_some(),
+                                }),
+                                "node" => serde_json::json!({
+                                    "id": entry.node_id.clone().unwrap_or_else(|| "node:unresolved".to_string()),
+                                    "kind": "node",
+                                    "route": "node",
+                                    "executionRoute": "node",
+                                    "label": "Paired node",
+                                    "nodeId": entry.node_id,
+                                    "trustState": "paired_node",
+                                    "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+                                    "available": entry.node_id.is_some(),
+                                }),
+                                _ => serde_json::json!({
+                                    "id": "local",
+                                    "kind": "local",
+                                    "route": "local",
+                                    "executionRoute": "local",
+                                    "label": "Local host",
+                                    "nodeId": serde_json::Value::Null,
+                                    "trustState": "trusted_local",
+                                    "health": "ready",
+                                    "available": true,
+                                }),
+                            };
                             let agent_id = entry.agent_id.clone();
                             payload["entry"] = serde_json::json!({
                                 "id": entry.id,
@@ -1311,6 +1395,12 @@ pub async fn prepare_gateway(
                                 "agent_id": agent_id.clone(),
                                 "agentId": agent_id,
                                 "node_id": entry.node_id,
+                                "workspace": entry.project_id,
+                                "surface": surface,
+                                "sessionKind": session_kind,
+                                "executionRoute": execution_route,
+                                "machine": machine,
+                                "externalAgentSource": entry.external_agent_source.unwrap_or_default().as_str(),
                                 "version": entry.version,
                             });
                         }

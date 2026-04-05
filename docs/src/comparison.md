@@ -15,7 +15,7 @@ How Moltis compares to other open-source AI agent frameworks.
 | Full codebase | — | — | — | 1,000+ tests | **~200K LoC** (3,100+ tests) |
 | Runtime | Node.js + npm | Single binary | Node.js | Single binary (3.4 MB) | **Single binary (44 MB)** |
 | Sandbox | App-level | — | Docker | Docker | **Docker + Apple Container** |
-| Memory safety | GC | GC | GC | Ownership | **Ownership, zero `unsafe`\*** |
+| Memory safety | GC | GC | GC | Ownership | **Ownership, isolated unsafe boundaries\*** |
 | Auth | Basic | API keys | None | Token + OAuth | **Password + Passkey + API keys** |
 | Voice I/O | Plugin | — | — | — | **Built-in (15+ providers)** |
 | MCP | Yes | — | — | — | **Yes (stdio + HTTP/SSE)** |
@@ -23,8 +23,8 @@ How Moltis compares to other open-source AI agent frameworks.
 | Skills | Yes (store) | Yes | Yes | Yes | **Yes (+ OpenClaw Store)** |
 | Memory/RAG | Plugin | — | Per-group | SQLite + FTS | **SQLite + FTS + vector** |
 
-\* `unsafe` is denied workspace-wide in Moltis. The only exceptions are opt-in
-FFI wrappers behind the `local-embeddings` feature flag, not part of the core.
+\* The main gateway/auth/tooling flow stays in safe Rust. Limited `unsafe`
+exists in isolated bridge and FFI paths rather than the core server path.
 
 ## Architecture Approach
 
@@ -83,7 +83,7 @@ differences from ZeroClaw:
 | Auth method | Basic password | API keys only | None (WhatsApp auth) | Token + OAuth | Password + Passkey + API keys |
 | SSRF protection | Plugin | — | — | DNS validation | DNS-resolved, blocks loopback/private/link-local/CGNAT |
 | WebSocket origin | — | N/A | — | — | Cross-origin rejection |
-| `unsafe` code | N/A (JS) | N/A (Go) | N/A (JS) | Minimal | Denied workspace-wide\* |
+| `unsafe` code | N/A (JS) | N/A (Go) | N/A (JS) | Minimal | Small isolated surface\* |
 | Hook gating | — | — | — | Skills-based | `BeforeToolCall` inspect/modify/block |
 | Rate limiting | — | — | — | — | Per-IP throttle, strict login limits |
 

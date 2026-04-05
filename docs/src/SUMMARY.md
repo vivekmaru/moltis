@@ -8,6 +8,7 @@
 
 - [Quickstart](quickstart.md)
 - [Installation](installation.md)
+- [Usage Guide](usage-guide.md)
 - [Comparison](comparison.md)
 - [Configuration](configuration.md)
 - [Local Validation](local-validation.md)
@@ -68,6 +69,9 @@
 
 # Architecture
 
+- [Architecture](architecture.md)
+- [Advanced Use Cases](advanced-use-cases.md)
+- [Integrations](integrations.md)
 - [System Prompt](system-prompt.md)
 - [Streaming](streaming.md)
 - [SQLite Migrations](sqlite-migration.md)

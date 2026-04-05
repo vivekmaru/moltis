@@ -2,11 +2,13 @@
 
 import { effect } from "@preact/signals";
 import { html } from "htm/preact";
-import { render } from "preact";
+import { createElement, render } from "preact";
 import { chatAddMsg, chatAddMsgWithImages, updateCommandInputUI } from "./chat-ui.js";
 import { highlightCodeBlocks } from "./code-highlight.js";
 import { SessionHeader } from "./components/session-header.js";
+import { WorkspaceOverview } from "./components/workspace-overview.js";
 import { formatBytes, formatTokens, renderMarkdown, sendRpc, warmAudioPlayback } from "./helpers.js";
+import { bindMachineComboEvents, fetchMachines, unbindMachineEvents } from "./machine-selector.js";
 import {
 	clearPendingImages,
 	getPendingImages,
@@ -15,7 +17,6 @@ import {
 	teardownMediaDrop,
 } from "./media-drop.js";
 import { bindModelComboEvents, setSessionModel } from "./models.js";
-import { bindNodeComboEvents, fetchNodes, unbindNodeEvents } from "./nodes-selector.js";
 import { registerPrefix, sessionPath } from "./router.js";
 import { routes } from "./routes.js";
 import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
@@ -246,6 +247,12 @@ function renderContextSessionSection(card, data) {
 	sessSection.appendChild(ctxRow("Model", sess.model || "default", true));
 	if (sess.provider) sessSection.appendChild(ctxRow("Provider", sess.provider, true));
 	if (sess.label) sessSection.appendChild(ctxRow("Label", sess.label));
+	if (sess.workspace) sessSection.appendChild(ctxRow("Workspace", sess.workspace));
+	if (sess.surface) sessSection.appendChild(ctxRow("Surface", sess.surface));
+	if (sess.executionRoute) sessSection.appendChild(ctxRow("Execution route", sess.executionRoute));
+	if (sess.machine?.label) sessSection.appendChild(ctxRow("Machine", sess.machine.label));
+	if (sess.machine?.trustState) sessSection.appendChild(ctxRow("Trust", sess.machine.trustState));
+	if (sess.externalAgentSource) sessSection.appendChild(ctxRow("Source", sess.externalAgentSource));
 	sessSection.appendChild(ctxRow("Tool Support", data.supportsTools === false ? "Disabled" : "Enabled"));
 	card.appendChild(sessSection);
 }
@@ -298,6 +305,85 @@ function renderContextToolsSection(card, data) {
 	card.appendChild(toolsSection);
 }
 
+function appendWorkspaceOverviewRow(section, label, value, mono = false) {
+	if (value) section.appendChild(ctxRow(label, value, mono));
+}
+
+function appendWorkspaceOverviewList(section, title, items, limit, renderRow) {
+	if (items.length === 0) return;
+	var label = ctxEl("div", "ctx-section-title", `${title} (${items.length})`);
+	label.classList.add("spaced");
+	section.appendChild(label);
+	items.slice(0, limit).forEach((item) => {
+		section.appendChild(renderRow(item));
+	});
+}
+
+function renderExternalActivityRow(activity) {
+	var row = ctxEl("div", "ctx-file");
+	row.appendChild(ctxEl("span", "ctx-file-path", `${activity.source}: ${activity.title || activity.summary}`));
+	row.appendChild(
+		ctxEl(
+			"span",
+			"ctx-file-size",
+			activity.importedMessageCount == null ? "" : `${activity.importedMessageCount} msgs`,
+		),
+	);
+	return row;
+}
+
+function renderRecentWorkspaceSessionRow(item) {
+	var row = ctxEl("div", "ctx-file");
+	row.appendChild(ctxEl("span", "ctx-file-path", item.label || item.key));
+	row.appendChild(ctxEl("span", "ctx-file-size", `${item.executionRoute} · ${item.externalAgentSource}`));
+	return row;
+}
+
+function hasWorkspaceOverviewState(overview, coordination, externalActivities) {
+	return Boolean(
+		overview.workspaceId ||
+			coordination.decision ||
+			coordination.currentPlan ||
+			coordination.nextAction ||
+			overview.memorySummary ||
+			externalActivities.length > 0,
+	);
+}
+
+function renderContextWorkspaceOverviewSection(card, data) {
+	var overview = data.workspaceOverview || {};
+	var section = ctxSection("Workspace Overview");
+	appendWorkspaceOverviewRow(section, "Workspace", overview.workspaceLabel || overview.workspaceId);
+	appendWorkspaceOverviewRow(section, "Current route", overview.currentExecutionRoute, true);
+	appendWorkspaceOverviewRow(section, "Approvals", overview.approvalMode);
+	appendWorkspaceOverviewRow(section, "Branch", overview.currentBranch, true);
+
+	var coordination = overview.coordination || {};
+	appendWorkspaceOverviewRow(section, "Decision", coordination.decision);
+	appendWorkspaceOverviewRow(section, "Current plan", coordination.currentPlan);
+	appendWorkspaceOverviewRow(section, "Next action", coordination.nextAction);
+	appendWorkspaceOverviewRow(section, "Constraints", coordination.routeConstraints);
+
+	if (overview.memorySummary) {
+		var notes = ctxEl("div", "ctx-value");
+		notes.style.whiteSpace = "pre-wrap";
+		notes.textContent = overview.memorySummary;
+		section.appendChild(notes);
+	}
+
+	var externalActivities = Array.isArray(overview.externalActivities) ? overview.externalActivities : [];
+	appendWorkspaceOverviewList(section, "External Activity", externalActivities, 3, renderExternalActivityRow);
+
+	var recentSessions = Array.isArray(overview.recentSessions) ? overview.recentSessions : [];
+	appendWorkspaceOverviewList(section, "Recent Sessions", recentSessions, 5, renderRecentWorkspaceSessionRow);
+
+	if (!hasWorkspaceOverviewState(overview, coordination, externalActivities)) {
+		section.appendChild(ctxEl("div", "ctx-empty", "No workspace coordination state captured yet"));
+	}
+
+	card.appendChild(section);
+}
+
 function renderContextSkillsSection(card, data) {
 	var skills = data.skills || [];
 	var skillsSection = ctxSection("Skills & Plugins");
@@ -343,7 +429,7 @@ function renderContextMcpSection(card, data) {
 				dot.style.background = "var(--ok)";
 				tag.appendChild(dot);
 				tag.appendChild(document.createTextNode(s.name));
-				tag.title = `${s.tool_count} tool${s.tool_count !== 1 ? "s" : ""} — ${s.state}`;
+				tag.title = `${s.tool_count} tool${s.tool_count === 1 ? "" : "s"} — ${s.state}`;
 				wrap.appendChild(tag);
 			});
 			section.appendChild(wrap);
@@ -359,21 +445,15 @@ function renderContextSandboxSection(card, data) {
 	var exec = data.execution || {};
 	var sandboxSection = ctxSection("Sandbox");
 	sandboxSection.appendChild(ctxRow("Enabled", sb.enabled ? "yes" : "no", true));
-	if (exec.mode) {
-		var execLabel = exec.mode === "sandbox" ? "sandboxed" : "host";
-		if (exec.promptSymbol) {
-			execLabel += ` (${exec.promptSymbol})`;
-		}
-		sandboxSection.appendChild(ctxRow("Command route", execLabel, true));
-	}
-	if (sb.backend) {
-		sandboxSection.appendChild(ctxRow("Backend", sb.backend));
-		if (sb.mode) sandboxSection.appendChild(ctxRow("Mode", sb.mode));
-		if (sb.scope) sandboxSection.appendChild(ctxRow("Scope", sb.scope));
-		if (sb.workspaceMount) sandboxSection.appendChild(ctxRow("Workspace Mount", sb.workspaceMount));
-		if (sb.image) sandboxSection.appendChild(ctxRow("Image", sb.image, true));
-		if (sb.containerName) sandboxSection.appendChild(ctxRow("Container", sb.containerName));
-	}
+	var execLabel = exec.mode ? (exec.mode === "sandbox" ? "sandboxed" : "host") : "";
+	if (execLabel && exec.promptSymbol) execLabel += ` (${exec.promptSymbol})`;
+	appendWorkspaceOverviewRow(sandboxSection, "Command route", execLabel, true);
+	appendWorkspaceOverviewRow(sandboxSection, "Backend", sb.backend);
+	appendWorkspaceOverviewRow(sandboxSection, "Mode", sb.mode);
+	appendWorkspaceOverviewRow(sandboxSection, "Scope", sb.scope);
+	appendWorkspaceOverviewRow(sandboxSection, "Workspace Mount", sb.workspaceMount);
+	appendWorkspaceOverviewRow(sandboxSection, "Image", sb.image, true);
+	appendWorkspaceOverviewRow(sandboxSection, "Container", sb.containerName);
 	card.appendChild(sandboxSection);
 }
 
@@ -430,6 +510,7 @@ function renderContextCard(data) {
 
 	renderContextSessionSection(card, data);
 	renderContextProjectSection(card, data);
+	renderContextWorkspaceOverviewSection(card, data);
 	renderContextSkillsSection(card, data);
 	renderContextMcpSection(card, data);
 	renderContextToolsSection(card, data);
@@ -509,6 +590,7 @@ function refreshDebugPanel() {
 		slashInjectStyles();
 		renderContextSessionSection(panel, res.payload);
 		renderContextProjectSection(panel, res.payload);
+		renderContextWorkspaceOverviewSection(panel, res.payload);
 		renderContextSkillsSection(panel, res.payload);
 		renderContextMcpSection(panel, res.payload);
 		renderContextToolsSection(panel, res.payload);
@@ -841,7 +923,7 @@ function handleSlashCommand(cmdName, cmdArgs) {
 
 // ── Build chat params (text-only or multimodal) ─────────
 function buildChatMessage(text, seq, displayText) {
-	var userText = displayText !== undefined ? displayText : text;
+	var userText = displayText === undefined ? text : displayText;
 	var images = hasPendingImages() ? getPendingImages() : [];
 	if (images.length > 0) {
 		var content = [];
@@ -860,6 +942,62 @@ function buildChatMessage(text, seq, displayText) {
 	};
 }
 
+function handleLocalSlashCommand(text, hasImages) {
+	if (!(text.charAt(0) === "/" && !hasImages)) return false;
+	var slash = parseSlashCommand(text);
+	if (!(slash && shouldHandleSlashLocally(slash.name, slash.args))) return false;
+	S.chatInput.value = "";
+	chatAutoResize();
+	slashHideMenu();
+	handleSlashCommand(slash.name, slash.args);
+	return true;
+}
+
+function persistChatHistory(text) {
+	if (!text) return;
+	S.chatHistory.push(text);
+	if (S.chatHistory.length > 200) S.setChatHistory(S.chatHistory.slice(-200));
+	localStorage.setItem("moltis-chat-history", JSON.stringify(S.chatHistory));
+}
+
+function resetChatInputAfterSend() {
+	S.setChatHistoryIdx(-1);
+	S.setChatHistoryDraft("");
+	S.chatInput.value = "";
+	chatAutoResize();
+	if (window.innerWidth < 768) {
+		S.chatInput.blur();
+	}
+}
+
+function resolveOutgoingText(text, hasImages) {
+	if (!(S.commandModeEnabled && text && !hasImages)) return text;
+	var parsed = parseSlashCommand(text);
+	return parsed && parsed.name === "sh" ? text : `/sh ${text}`;
+}
+
+function applySelectedModelToChatParams(chatParams) {
+	var selectedModel = S.selectedModelId;
+	if (!selectedModel) return;
+	chatParams.model = selectedModel;
+	setSessionModel(S.activeSessionKey, selectedModel);
+}
+
+function handleChatSendResult(userEl, sessionKey) {
+	return (res) => {
+		if (res?.ok && res.payload?.runId) {
+			setSessionActiveRunId(sessionKey, res.payload.runId);
+		}
+		if (res?.payload?.queued) {
+			markMessageQueued(userEl, sessionKey);
+			return;
+		}
+		if (res && !res.ok && res.error) {
+			chatAddMsg("error", res.error.message || "Request failed");
+		}
+	};
+}
+
 // ── Send chat message ────────────────────────────────────
 function sendChat() {
 	var text = S.chatInput.value.trim();
@@ -869,37 +1007,12 @@ function sendChat() {
 	// Unlock audio playback while we still have user-gesture context.
 	warmAudioPlayback();
 
-	if (text.charAt(0) === "/" && !hasImages) {
-		var slash = parseSlashCommand(text);
-		if (slash && shouldHandleSlashLocally(slash.name, slash.args)) {
-			S.chatInput.value = "";
-			chatAutoResize();
-			slashHideMenu();
-			handleSlashCommand(slash.name, slash.args);
-			return;
-		}
-	}
+	if (handleLocalSlashCommand(text, hasImages)) return;
 
-	if (text) {
-		S.chatHistory.push(text);
-		if (S.chatHistory.length > 200) S.setChatHistory(S.chatHistory.slice(-200));
-		localStorage.setItem("moltis-chat-history", JSON.stringify(S.chatHistory));
-	}
-	S.setChatHistoryIdx(-1);
-	S.setChatHistoryDraft("");
-	S.chatInput.value = "";
-	chatAutoResize();
-	if (window.innerWidth < 768) {
-		S.chatInput.blur();
-	}
+	persistChatHistory(text);
+	resetChatInputAfterSend();
 
-	var outgoingText = text;
-	if (S.commandModeEnabled && text && !hasImages) {
-		var parsed = parseSlashCommand(text);
-		if (!(parsed && parsed.name === "sh")) {
-			outgoingText = `/sh ${text}`;
-		}
-	}
+	var outgoingText = resolveOutgoingText(text, hasImages);
 
 	S.setChatSeq(S.chatSeq + 1);
 	var msg = buildChatMessage(outgoingText, S.chatSeq, text);
@@ -908,25 +1021,13 @@ function sendChat() {
 	// Highlight code blocks in the user message (if any).
 	if (userEl) highlightCodeBlocks(userEl);
 
-	var selectedModel = S.selectedModelId;
-	if (selectedModel) {
-		chatParams.model = selectedModel;
-		setSessionModel(S.activeSessionKey, selectedModel);
-	}
-	bumpSessionCount(S.activeSessionKey, 1);
-	cacheOutgoingUserMessage(S.activeSessionKey, chatParams);
-	seedSessionPreviewFromUserText(S.activeSessionKey, text || outgoingText);
-	setSessionReplying(S.activeSessionKey, true);
-	sendRpc("chat.send", chatParams).then((res) => {
-		if (res?.ok && res.payload?.runId) {
-			setSessionActiveRunId(S.activeSessionKey, res.payload.runId);
-		}
-		if (res?.payload?.queued) {
-			markMessageQueued(userEl, S.activeSessionKey);
-		} else if (res && !res.ok && res.error) {
-			chatAddMsg("error", res.error.message || "Request failed");
-		}
-	});
+	applySelectedModelToChatParams(chatParams);
+	var sessionKey = S.activeSessionKey;
+	bumpSessionCount(sessionKey, 1);
+	cacheOutgoingUserMessage(sessionKey, chatParams);
+	seedSessionPreviewFromUserText(sessionKey, text || outgoingText);
+	setSessionReplying(sessionKey, true);
+	sendRpc("chat.send", chatParams).then(handleChatSendResult(userEl, sessionKey));
 	maybeRefreshFullContext();
 }
 
@@ -1005,7 +1106,7 @@ var chatPageHTML =
 	'<div id="nodeCombo" class="model-combo hidden">' +
 	'<button id="nodeComboBtn" class="model-combo-btn" type="button">' +
 	'<span class="icon icon-sm icon-server" style="flex-shrink:0;"></span>' +
-	'<span id="nodeComboLabel">Local</span>' +
+	'<span id="nodeComboLabel">Local host</span>' +
 	'<span class="icon icon-sm icon-chevron-down model-combo-chevron"></span>' +
 	"</button>" +
 	'<div id="nodeDropdown" class="model-dropdown hidden" tabindex="-1">' +
@@ -1057,6 +1158,7 @@ var chatPageHTML =
 	'<div id="sessionControlsSection" class="border-t border-[var(--border)] pt-3">' +
 	'<div id="sessionHeaderModalMount" class="w-full"></div>' +
 	"</div>" +
+	'<div id="workspaceOverviewMount" class="border-t border-[var(--border)] pt-3"></div>' +
 	"</div>" +
 	"</div>" +
 	"</div>" +
@@ -1122,249 +1224,263 @@ function handleChatCopy(e) {
 	}
 }
 
+function initChatState(container) {
+	container.style.cssText = "position:relative";
+	// Safe: chatPageHTML is a static hardcoded template with no user input.
+	// This is a compile-time constant defined above — no dynamic or user data.
+	container.innerHTML = chatPageHTML; // eslint-disable-line no-unsanitized/property
+
+	S.setChatMsgBox(S.$("messages"));
+	S.setChatInput(S.$("chatInput"));
+	S.setChatSendBtn(S.$("sendBtn"));
+	updateCommandInputUI();
+}
+
+function initModelControls() {
+	S.setModelCombo(S.$("modelCombo"));
+	S.setModelComboBtn(S.$("modelComboBtn"));
+	S.setModelComboLabel(S.$("modelComboLabel"));
+	S.setModelDropdown(S.$("modelDropdown"));
+	S.setModelSearchInput(S.$("modelSearchInput"));
+	S.setModelDropdownList(S.$("modelDropdownList"));
+	bindModelComboEvents();
+}
+
+function initNodeControls() {
+	S.setNodeCombo(S.$("nodeCombo"));
+	S.setNodeComboBtn(S.$("nodeComboBtn"));
+	S.setNodeComboLabel(S.$("nodeComboLabel"));
+	S.setNodeDropdown(S.$("nodeDropdown"));
+	S.setNodeDropdownList(S.$("nodeDropdownList"));
+	bindMachineComboEvents();
+	fetchMachines();
+}
+
+function initSandboxControls() {
+	S.setSandboxToggleBtn(S.$("sandboxToggle"));
+	S.setSandboxLabel(S.$("sandboxLabel"));
+	bindSandboxToggleEvents();
+	updateSandboxUI(true);
+
+	S.setSandboxImageBtn(S.$("sandboxImageBtn"));
+	S.setSandboxImageLabel(S.$("sandboxImageLabel"));
+	S.setSandboxImageDropdown(S.$("sandboxImageDropdown"));
+	bindSandboxImageEvents();
+	updateSandboxImageUI(null);
+}
+
+function mountSessionHeader(target, props) {
+	if (!target) return;
+	render(createElement(SessionHeader, props), target);
+}
+
+function setupSessionHeaderMounts(closeChatMore) {
+	mountSessionHeader(S.$("sessionHeaderToolbarMount"), {
+		showName: false,
+		showShare: false,
+		showFork: false,
+		showClear: false,
+		showDelete: false,
+	});
+	mountSessionHeader(S.$("sessionHeaderModalMount"), {
+		showSelectors: false,
+		showStop: false,
+		showFork: false,
+		showShare: false,
+		showDelete: false,
+		nameOwnLine: true,
+		showRenameButton: true,
+	});
+	mountSessionHeader(S.$("sessionHeaderModalTopMount"), {
+		showSelectors: false,
+		showName: false,
+		showStop: false,
+		showClear: false,
+		actionButtonClass: "provider-btn provider-btn-secondary provider-btn-sm",
+		onBeforeShare: () => closeChatMore?.(),
+		onBeforeDelete: () => closeChatMore?.(),
+	});
+	var workspaceOverviewMount = S.$("workspaceOverviewMount");
+	if (workspaceOverviewMount) {
+		render(html`<${WorkspaceOverview} />`, workspaceOverviewMount);
+	}
+}
+
+function setupSessionControlsVisibility() {
+	var sessionControlsSection = S.$("sessionControlsSection");
+	if (!sessionControlsSection) return;
+	disposeSessionControlsVisibility?.();
+	disposeSessionControlsVisibility = effect(() => {
+		var isMainSession = (sessionStore.activeSessionKey.value || "main") === "main";
+		sessionControlsSection.classList.toggle("hidden", isMainSession);
+	});
+}
+
+function setupOverlayModal(modalId, closeBtnId, onClose) {
+	var modal = S.$(modalId);
+	var closeBtn = S.$(closeBtnId);
+	if (!modal) return null;
+	if (closeBtn) closeBtn.addEventListener("click", onClose);
+	modal.addEventListener("click", (e) => {
+		if (e.target === modal) onClose();
+	});
+	return modal;
+}
+
+function setupChatMoreModal(debugModal, fullContextModal, closeDebugModal, closeFullContextModal) {
+	var chatMoreModal = S.$("chatMoreModal");
+	var chatMoreBtn = S.$("chatMoreBtn");
+	if (!(chatMoreModal && chatMoreBtn)) return null;
+
+	var closeChatMore = () => {
+		chatMoreModal.classList.add("hidden");
+		chatMoreBtn.classList.remove("active");
+		if (S.sandboxImageDropdown) {
+			S.sandboxImageDropdown.classList.add("hidden");
+		}
+	};
+	var openChatMore = () => {
+		setDebugModalOpen(false);
+		setFullContextModalOpen(false);
+		chatMoreModal.classList.remove("hidden");
+		chatMoreBtn.classList.add("active");
+	};
+	chatMoreBtn.addEventListener("click", openChatMore);
+	chatMoreModal.addEventListener("click", (e) => {
+		if (e.target === chatMoreModal) closeChatMore();
+	});
+	for (var closeAfterToggleId of ["debugPanelBtn", "fullContextBtn"]) {
+		var closeAfterToggleBtn = S.$(closeAfterToggleId);
+		if (closeAfterToggleBtn) closeAfterToggleBtn.addEventListener("click", closeChatMore);
+	}
+	chatMoreModalKeydownHandler = (e) => {
+		if (e.key !== "Escape") return;
+		if (fullContextModal && !fullContextModal.classList.contains("hidden")) {
+			closeFullContextModal?.();
+			return;
+		}
+		if (debugModal && !debugModal.classList.contains("hidden")) {
+			closeDebugModal?.();
+			return;
+		}
+		closeChatMore();
+	};
+	document.addEventListener("keydown", chatMoreModalKeydownHandler);
+	return closeChatMore;
+}
+
+function setupDeleteAllButton(closeChatMore) {
+	var chatMoreDeleteAllBtn = S.$("chatMoreDeleteAllBtn");
+	if (!chatMoreDeleteAllBtn) return;
+	var chatMoreDeleteAllLabel = S.$("chatMoreDeleteAllLabel");
+	var deleteAllInFlight = false;
+	chatMoreDeleteAllBtn.addEventListener("click", () => {
+		if (deleteAllInFlight) return;
+		deleteAllInFlight = true;
+		chatMoreDeleteAllBtn.disabled = true;
+		if (chatMoreDeleteAllLabel) {
+			chatMoreDeleteAllLabel.textContent = "Deleting…";
+		}
+		closeChatMore?.();
+		clearAllSessions()
+			.then((res) => {
+				if (res?.ok && !res?.skipped) return;
+				if (res?.cancelled || res?.skipped) return;
+				chatAddMsg("error", res?.error?.message || "Failed to clear sessions");
+			})
+			.finally(() => {
+				deleteAllInFlight = false;
+				chatMoreDeleteAllBtn.disabled = false;
+				if (chatMoreDeleteAllLabel) {
+					chatMoreDeleteAllLabel.textContent = "Delete all sessions";
+				}
+			});
+	});
+}
+
+function syncInitialModelLabel() {
+	if (!(S.models.length > 0 && S.modelComboLabel)) return;
+	var found = S.models.find((m) => m.id === S.selectedModelId);
+	var selected = found || S.models[0];
+	if (selected) {
+		S.modelComboLabel.textContent = selected.displayName || selected.id;
+	}
+}
+
+function resolveInitialSessionKey(sessionKeyFromUrl) {
+	if (sessionKeyFromUrl) return sessionKeyFromUrl;
+	var sessionKey = localStorage.getItem("moltis-session") || "main";
+	history.replaceState(null, "", sessionPath(sessionKey));
+	return sessionKey;
+}
+
+function bindChatInputHandlers() {
+	S.chatInput.addEventListener("input", () => {
+		chatAutoResize();
+		slashHandleInput();
+	});
+	S.chatInput.addEventListener("keydown", (e) => {
+		if (slashHandleKeydown(e)) return;
+		if (e.key === "Escape" && S.commandModeEnabled && !S.chatInput.value.trim()) {
+			e.preventDefault();
+			setCommandMode(false);
+			return;
+		}
+		if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+			e.preventDefault();
+			sendChat();
+			return;
+		}
+		if (e.key === "ArrowUp" && S.chatInput.selectionStart === 0 && !e.shiftKey) {
+			e.preventDefault();
+			handleHistoryUp();
+			return;
+		}
+		if (e.key === "ArrowDown" && S.chatInput.selectionStart === S.chatInput.value.length && !e.shiftKey) {
+			e.preventDefault();
+			handleHistoryDown();
+		}
+	});
+	S.chatSendBtn.addEventListener("click", sendChat);
+}
+
 registerPrefix(
 	routes.chats,
 	function initChat(container, sessionKeyFromUrl) {
-		container.style.cssText = "position:relative";
-		// Safe: chatPageHTML is a static hardcoded template with no user input.
-		// This is a compile-time constant defined above — no dynamic or user data.
-		container.innerHTML = chatPageHTML; // eslint-disable-line no-unsanitized/property
-
-		S.setChatMsgBox(S.$("messages"));
-		S.setChatInput(S.$("chatInput"));
-		S.setChatSendBtn(S.$("sendBtn"));
-		updateCommandInputUI();
-
-		S.setModelCombo(S.$("modelCombo"));
-		S.setModelComboBtn(S.$("modelComboBtn"));
-		S.setModelComboLabel(S.$("modelComboLabel"));
-		S.setModelDropdown(S.$("modelDropdown"));
-		S.setModelSearchInput(S.$("modelSearchInput"));
-		S.setModelDropdownList(S.$("modelDropdownList"));
-		bindModelComboEvents();
-
-		S.setNodeCombo(S.$("nodeCombo"));
-		S.setNodeComboBtn(S.$("nodeComboBtn"));
-		S.setNodeComboLabel(S.$("nodeComboLabel"));
-		S.setNodeDropdown(S.$("nodeDropdown"));
-		S.setNodeDropdownList(S.$("nodeDropdownList"));
-		bindNodeComboEvents();
-		fetchNodes();
-
-		S.setSandboxToggleBtn(S.$("sandboxToggle"));
-		S.setSandboxLabel(S.$("sandboxLabel"));
-		bindSandboxToggleEvents();
-		updateSandboxUI(true);
-
-		S.setSandboxImageBtn(S.$("sandboxImageBtn"));
-		S.setSandboxImageLabel(S.$("sandboxImageLabel"));
-		S.setSandboxImageDropdown(S.$("sandboxImageDropdown"));
-		bindSandboxImageEvents();
-		updateSandboxImageUI(null);
+		initChatState(container);
+		initModelControls();
+		initNodeControls();
+		initSandboxControls();
 
 		var closeChatMore = null;
-		var closeDebugModal = null;
-		var closeFullContextModal = null;
-
-		// Mount compact controls in toolbar and full session controls in modal.
-		var headerToolbarMount = S.$("sessionHeaderToolbarMount");
-		if (headerToolbarMount) {
-			render(
-				html`<${SessionHeader}
-						showName=${false}
-						showShare=${false}
-						showFork=${false}
-						showClear=${false}
-						showDelete=${false}
-					/>`,
-				headerToolbarMount,
-			);
-		}
-		var headerModalMount = S.$("sessionHeaderModalMount");
-		if (headerModalMount) {
-			render(
-				html`<${SessionHeader}
-						showSelectors=${false}
-						showStop=${false}
-						showFork=${false}
-						showShare=${false}
-						showDelete=${false}
-						nameOwnLine=${true}
-						showRenameButton=${true}
-					/>`,
-				headerModalMount,
-			);
-		}
-		var sessionControlsSection = S.$("sessionControlsSection");
-		if (sessionControlsSection) {
-			disposeSessionControlsVisibility?.();
-			disposeSessionControlsVisibility = effect(() => {
-				var isMainSession = (sessionStore.activeSessionKey.value || "main") === "main";
-				sessionControlsSection.classList.toggle("hidden", isMainSession);
-			});
-		}
-		var headerModalTopMount = S.$("sessionHeaderModalTopMount");
-		if (headerModalTopMount) {
-			render(
-				html`<${SessionHeader}
-						showSelectors=${false}
-						showName=${false}
-						showStop=${false}
-						showClear=${false}
-						actionButtonClass=${"provider-btn provider-btn-secondary provider-btn-sm"}
-						onBeforeShare=${() => closeChatMore?.()}
-						onBeforeDelete=${() => closeChatMore?.()}
-					/>`,
-				headerModalTopMount,
-			);
-		}
+		var closeDebugModal = () => setDebugModalOpen(false);
+		var closeFullContextModal = () => setFullContextModalOpen(false);
+		setupSessionHeaderMounts(() => closeChatMore?.());
+		setupSessionControlsVisibility();
 
 		var mcpToggle = S.$("mcpToggleBtn");
 		if (mcpToggle) mcpToggle.addEventListener("click", toggleMcp);
 		updateMcpToggleUI(true); // default: MCP enabled
 
-		var debugModal = S.$("debugModal");
-		var debugModalCloseBtn = S.$("debugModalCloseBtn");
-		if (debugModal) {
-			closeDebugModal = () => setDebugModalOpen(false);
-			if (debugModalCloseBtn) debugModalCloseBtn.addEventListener("click", closeDebugModal);
-			debugModal.addEventListener("click", (e) => {
-				if (e.target === debugModal) closeDebugModal();
-			});
-		}
-
-		var fullContextModal = S.$("fullContextModal");
-		var fullContextModalCloseBtn = S.$("fullContextModalCloseBtn");
-		if (fullContextModal) {
-			closeFullContextModal = () => setFullContextModalOpen(false);
-			if (fullContextModalCloseBtn) fullContextModalCloseBtn.addEventListener("click", closeFullContextModal);
-			fullContextModal.addEventListener("click", (e) => {
-				if (e.target === fullContextModal) closeFullContextModal();
-			});
-		}
-
-		var chatMoreModal = S.$("chatMoreModal");
-		var chatMoreBtn = S.$("chatMoreBtn");
-		if (chatMoreModal && chatMoreBtn) {
-			closeChatMore = () => {
-				chatMoreModal.classList.add("hidden");
-				chatMoreBtn.classList.remove("active");
-				if (S.sandboxImageDropdown) {
-					S.sandboxImageDropdown.classList.add("hidden");
-				}
-			};
-			var openChatMore = () => {
-				setDebugModalOpen(false);
-				setFullContextModalOpen(false);
-				chatMoreModal.classList.remove("hidden");
-				chatMoreBtn.classList.add("active");
-			};
-			chatMoreBtn.addEventListener("click", openChatMore);
-			chatMoreModal.addEventListener("click", (e) => {
-				if (e.target === chatMoreModal) closeChatMore();
-			});
-			for (var closeAfterToggleId of ["debugPanelBtn", "fullContextBtn"]) {
-				var closeAfterToggleBtn = S.$(closeAfterToggleId);
-				if (closeAfterToggleBtn) closeAfterToggleBtn.addEventListener("click", closeChatMore);
-			}
-			chatMoreModalKeydownHandler = (e) => {
-				if (e.key !== "Escape") return;
-				if (fullContextModal && !fullContextModal.classList.contains("hidden")) {
-					closeFullContextModal?.();
-					return;
-				}
-				if (debugModal && !debugModal.classList.contains("hidden")) {
-					closeDebugModal?.();
-					return;
-				}
-				closeChatMore();
-			};
-			document.addEventListener("keydown", chatMoreModalKeydownHandler);
-		}
-		var chatMoreDeleteAllBtn = S.$("chatMoreDeleteAllBtn");
-		if (chatMoreDeleteAllBtn) {
-			var chatMoreDeleteAllLabel = S.$("chatMoreDeleteAllLabel");
-			var deleteAllInFlight = false;
-			chatMoreDeleteAllBtn.addEventListener("click", () => {
-				if (deleteAllInFlight) return;
-				deleteAllInFlight = true;
-				chatMoreDeleteAllBtn.disabled = true;
-				if (chatMoreDeleteAllLabel) {
-					chatMoreDeleteAllLabel.textContent = "Deleting\u2026";
-				}
-				closeChatMore?.();
-				clearAllSessions()
-					.then((res) => {
-						if (res?.ok && !res?.skipped) return;
-						if (res?.cancelled || res?.skipped) return;
-						chatAddMsg("error", res?.error?.message || "Failed to clear sessions");
-					})
-					.finally(() => {
-						deleteAllInFlight = false;
-						chatMoreDeleteAllBtn.disabled = false;
-						if (chatMoreDeleteAllLabel) {
-							chatMoreDeleteAllLabel.textContent = "Delete all sessions";
-						}
-					});
-			});
-		}
+		var debugModal = setupOverlayModal("debugModal", "debugModalCloseBtn", closeDebugModal);
+		var fullContextModal = setupOverlayModal("fullContextModal", "fullContextModalCloseBtn", closeFullContextModal);
+		closeChatMore = setupChatMoreModal(debugModal, fullContextModal, closeDebugModal, closeFullContextModal);
+		setupDeleteAllButton(closeChatMore);
 
 		var debugBtn = S.$("debugPanelBtn");
 		if (debugBtn) debugBtn.addEventListener("click", toggleDebugPanel);
 
 		S.$("fullContextBtn")?.addEventListener("click", toggleFullContextPanel);
 
-		if (S.models.length > 0 && S.modelComboLabel) {
-			var found = S.models.find((m) => m.id === S.selectedModelId);
-			if (found) {
-				S.modelComboLabel.textContent = found.displayName || found.id;
-			} else if (S.models[0]) {
-				S.modelComboLabel.textContent = S.models[0].displayName || S.models[0].id;
-			}
-		}
-
-		// Determine session key from URL or localStorage
-		var sessionKey;
-		if (sessionKeyFromUrl) {
-			sessionKey = sessionKeyFromUrl;
-		} else {
-			sessionKey = localStorage.getItem("moltis-session") || "main";
-			history.replaceState(null, "", sessionPath(sessionKey));
-		}
+		syncInitialModelLabel();
+		var sessionKey = resolveInitialSessionKey(sessionKeyFromUrl);
 
 		if (S.connected) {
 			S.chatSendBtn.disabled = false;
 			switchSession(sessionKey);
 		}
 
-		S.chatInput.addEventListener("input", () => {
-			chatAutoResize();
-			slashHandleInput();
-		});
-		S.chatInput.addEventListener("keydown", (e) => {
-			if (slashHandleKeydown(e)) return;
-			if (e.key === "Escape" && S.commandModeEnabled && !S.chatInput.value.trim()) {
-				e.preventDefault();
-				setCommandMode(false);
-				return;
-			}
-			if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-				e.preventDefault();
-				sendChat();
-				return;
-			}
-			if (e.key === "ArrowUp" && S.chatInput.selectionStart === 0 && !e.shiftKey) {
-				e.preventDefault();
-				handleHistoryUp();
-				return;
-			}
-			if (e.key === "ArrowDown" && S.chatInput.selectionStart === S.chatInput.value.length && !e.shiftKey) {
-				e.preventDefault();
-				handleHistoryDown();
-				return;
-			}
-		});
-		S.chatSendBtn.addEventListener("click", sendChat);
+		bindChatInputHandlers();
 
 		S.chatMsgBox.addEventListener("copy", handleChatCopy);
 
@@ -1382,7 +1498,7 @@ registerPrefix(
 	function teardownChat() {
 		teardownVoiceInput();
 		teardownMediaDrop();
-		unbindNodeEvents();
+		unbindMachineEvents();
 		slashHideMenu();
 		if (chatMoreModalKeydownHandler) {
 			document.removeEventListener("keydown", chatMoreModalKeydownHandler);
@@ -1396,6 +1512,8 @@ registerPrefix(
 		if (headerModalMount) render(null, headerModalMount);
 		var headerModalTopMount = S.$("sessionHeaderModalTopMount");
 		if (headerModalTopMount) render(null, headerModalTopMount);
+		var workspaceOverviewMount = S.$("workspaceOverviewMount");
+		if (workspaceOverviewMount) render(null, workspaceOverviewMount);
 		S.setChatMsgBox(null);
 		S.setChatInput(null);
 		S.setChatSendBtn(null);
