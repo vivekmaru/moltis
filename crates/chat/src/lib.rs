@@ -1235,6 +1235,28 @@ fn machine_payload(
     }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedExecutionContext {
+    route: ExecutionRoute,
+    machine: Value,
+}
+
+fn sandbox_machine_available(state: &Arc<dyn ChatRuntime>) -> bool {
+    state
+        .sandbox_router()
+        .is_some_and(|router| router.backend().is_real())
+}
+
+async fn resolve_execution_context(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    session_entry: Option<&SessionEntry>,
+) -> ResolvedExecutionContext {
+    let route = effective_execution_route(state, session_key, session_entry).await;
+    let machine = machine_payload(route, session_entry, sandbox_machine_available(state));
+    ResolvedExecutionContext { route, machine }
+}
+
 fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
     match route {
         ExecutionRoute::Sandbox => "sandbox",
@@ -1356,7 +1378,7 @@ async fn build_prompt_runtime_context(
         .as_ref()
         .map(|loc| loc.to_string());
     let channel_context = resolve_channel_runtime_context(session_key, session_entry);
-    let execution_route = effective_execution_route(state, session_key, session_entry).await;
+    let execution_context = resolve_execution_context(state, session_key, session_entry).await;
     let workspace = session_entry.and_then(|entry| entry.project_id.clone());
     let external_agent_source = normalize_external_agent_source(
         session_entry.and_then(|entry| entry.external_agent_source),
@@ -1378,7 +1400,7 @@ async fn build_prompt_runtime_context(
         channel_chat_id: channel_context.channel_chat_id,
         channel_chat_type: channel_context.channel_chat_type,
         workspace,
-        execution_route: Some(execution_route.as_str().to_string()),
+        execution_route: Some(execution_context.route.as_str().to_string()),
         external_agent_source: Some(external_agent_source.as_str().to_string()),
         data_dir: Some(data_dir_display),
         sudo_non_interactive,
@@ -4677,13 +4699,8 @@ impl ChatService for LiveChatService {
                 )
             }
         };
-        let execution_route =
-            effective_execution_route(&self.state, &session_key, session_entry.as_ref()).await;
-        let current_machine = machine_payload(
-            execution_route,
-            session_entry.as_ref(),
-            self.state.sandbox_router().is_some(),
-        );
+        let execution_context =
+            resolve_execution_context(&self.state, &session_key, session_entry.as_ref()).await;
         let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
         let external_agent_source = normalize_external_agent_source(
             session_entry
@@ -4700,8 +4717,8 @@ impl ChatService for LiveChatService {
             "workspace": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
             "surface": surface_ctx.surface,
             "sessionKind": surface_ctx.session_kind,
-            "executionRoute": execution_route.as_str(),
-            "machine": current_machine,
+            "executionRoute": execution_context.route.as_str(),
+            "machine": execution_context.machine,
             "externalAgentSource": external_agent_source.as_str(),
         });
 
@@ -4868,8 +4885,8 @@ impl ChatService for LiveChatService {
             })
         };
         let host_is_root = detect_host_root_user().await;
-        let exec_mode = execution_mode_for_route(execution_route);
-        let exec_is_root = execution_root_for_route(execution_route, host_is_root);
+        let exec_mode = execution_mode_for_route(execution_context.route);
+        let exec_is_root = execution_root_for_route(execution_context.route, host_is_root);
         let exec_prompt_symbol = exec_is_root.map(|is_root| {
             if is_root {
                 "#"
@@ -4879,7 +4896,7 @@ impl ChatService for LiveChatService {
         });
         let execution_info = serde_json::json!({
             "mode": exec_mode,
-            "route": execution_route.as_str(),
+            "route": execution_context.route.as_str(),
             "hostIsRoot": host_is_root,
             "isRoot": exec_is_root,
             "promptSymbol": exec_prompt_symbol,
@@ -4925,12 +4942,8 @@ impl ChatService for LiveChatService {
                 "workspaceLabel": workspace_linked_project.get("label"),
                 "linkedProject": workspace_linked_project,
                 "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
-                "currentExecutionRoute": execution_route.as_str(),
-                "machine": machine_payload(
-                    execution_route,
-                    session_entry.as_ref(),
-                    self.state.sandbox_router().is_some(),
-                ),
+                "currentExecutionRoute": execution_context.route.as_str(),
+                "machine": execution_context.machine.clone(),
                 "approvalMode": config.tools.exec.approval_mode,
                 "coordination": {
                     "decision": coordination.decision,
@@ -9603,6 +9616,32 @@ mod tests {
             Some(true)
         );
         assert_eq!(execution_root_for_route(ExecutionRoute::Node, None), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_marks_fallback_sandbox_unavailable_without_backend() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.sandbox_enabled = Some(true);
+
+        let resolved = resolve_execution_context(&runtime, &entry.key, Some(&entry)).await;
+        assert_eq!(resolved.route, ExecutionRoute::Sandbox);
+        assert_eq!(resolved.machine["executionRoute"], "sandbox");
+        assert_eq!(resolved.machine["available"], false);
+        assert_eq!(resolved.machine["health"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_preserves_remote_binding_identity() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("ssh:target:42".to_string());
+
+        let resolved = resolve_execution_context(&runtime, &entry.key, Some(&entry)).await;
+        assert_eq!(resolved.route, ExecutionRoute::Ssh);
+        assert_eq!(resolved.machine["id"], "ssh:target:42");
+        assert_eq!(resolved.machine["executionRoute"], "ssh");
+        assert_eq!(resolved.machine["kind"], "ssh");
     }
 
     #[test]
