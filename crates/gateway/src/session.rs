@@ -1098,15 +1098,82 @@ impl LiveSessionService {
         let Some(project_id) = project_id else {
             return None;
         };
+        self.project_for_id(project_id)
+            .await
+            .map(|project| project.label)
+    }
+
+    async fn project_for_id(&self, project_id: &str) -> Option<moltis_projects::Project> {
         let Some(ref project_store) = self.project_store else {
             return None;
         };
-        project_store
-            .get(project_id)
+        project_store.get(project_id).await.ok().flatten()
+    }
+
+    async fn project_preferred_machine_id(&self, project_id: Option<&str>) -> Option<String> {
+        let project_id = project_id?;
+        self.project_for_id(project_id)
             .await
-            .ok()
-            .flatten()
-            .map(|project| project.label)
+            .and_then(|project| project.preferred_machine_id)
+            .map(|machine_id| machine_id.trim().to_string())
+            .filter(|machine_id| !machine_id.is_empty())
+    }
+
+    async fn apply_machine_binding(&self, session_key: &str, machine_id: Option<&str>) {
+        let normalized_machine_id = machine_id
+            .map(str::trim)
+            .filter(|machine_id| !machine_id.is_empty())
+            .unwrap_or(crate::machine::LOCAL_MACHINE_ID);
+
+        match normalized_machine_id {
+            crate::machine::LOCAL_MACHINE_ID => {
+                let _ = self.metadata.set_node_id(session_key, None).await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(false))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, false).await;
+                }
+            },
+            crate::machine::SANDBOX_MACHINE_ID => {
+                let _ = self.metadata.set_node_id(session_key, None).await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(true))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, true).await;
+                }
+            },
+            _ => {
+                let _ = self
+                    .metadata
+                    .set_node_id(session_key, Some(normalized_machine_id))
+                    .await;
+                self.metadata
+                    .set_sandbox_enabled(session_key, Some(false))
+                    .await;
+                if let Some(ref router) = self.sandbox_router {
+                    router.set_override(session_key, false).await;
+                }
+            },
+        }
+    }
+
+    async fn apply_project_machine_binding(&self, session_key: &str, project_id: Option<&str>) {
+        let preferred_machine_id = self.project_preferred_machine_id(project_id).await;
+        self.apply_machine_binding(session_key, preferred_machine_id.as_deref())
+            .await;
+    }
+
+    fn preferred_machine_payload(machine_id: Option<&str>, sandbox_available: bool) -> Value {
+        let Some(machine_id) = machine_id else {
+            return Value::Null;
+        };
+        serde_json::to_value(crate::machine::session_binding_from_machine_id(
+            machine_id,
+            sandbox_available,
+        ))
+        .unwrap_or(Value::Null)
     }
 
     async fn load_coordination(&self, session_key: &str) -> CoordinationState {
@@ -1283,10 +1350,16 @@ impl LiveSessionService {
                     .ok()
                     .flatten()
                     .map(|project| {
+                        let preferred_machine_id = project.preferred_machine_id.clone();
                         serde_json::json!({
                             "id": project.id,
                             "label": project.label,
                             "directory": project.directory,
+                            "preferredMachineId": preferred_machine_id,
+                            "preferredMachine": Self::preferred_machine_payload(
+                                preferred_machine_id.as_deref(),
+                                self.sandbox_router.is_some(),
+                            ),
                         })
                     })
                     .unwrap_or(Value::Null)
@@ -1530,7 +1603,12 @@ impl SessionService for LiveSessionService {
         }
         if let Some(project_id_opt) = p.project_id {
             let project_id = project_id_opt.filter(|s| !s.is_empty());
+            let project_binding = project_id.clone();
             self.metadata.set_project_id(key, project_id).await;
+            if project_binding.is_some() {
+                self.apply_project_machine_binding(key, project_binding.as_deref())
+                    .await;
+            }
         }
         if let Some(worktree_branch_opt) = p.worktree_branch {
             let worktree_branch = worktree_branch_opt.filter(|s| !s.is_empty());
@@ -2379,7 +2457,9 @@ impl SessionService for LiveSessionService {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use {super::*, std::sync::Arc};
+
+    use moltis_projects::{ProjectStore, SqliteProjectStore, store::new_project};
 
     #[test]
     fn filter_ui_history_removes_empty_assistant_messages() {
@@ -3426,6 +3506,76 @@ mod tests {
         assert_eq!(
             entry.external_agent_source,
             Some(ExternalAgentSource::ClaudeCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_project_binding_applies_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some(crate::machine::SANDBOX_MACHINE_ID.to_string());
+        project_store.upsert(project).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "projectId": "ops",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["workspace"], "ops");
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.project_id.as_deref(), Some("ops"));
+        assert_eq!(entry.sandbox_enabled, Some(true));
+        assert_eq!(entry.node_id, None);
+    }
+
+    #[tokio::test]
+    async fn workspace_overview_includes_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some("node-build".into());
+        project_store.upsert(project).await.unwrap();
+        metadata
+            .set_project_id("main", Some("ops".to_string()))
+            .await;
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let overview = svc
+            .workspace_overview(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            overview["linkedProject"]["preferredMachineId"],
+            "node-build"
+        );
+        assert_eq!(
+            overview["linkedProject"]["preferredMachine"]["id"],
+            "node-build"
+        );
+        assert_eq!(
+            overview["linkedProject"]["preferredMachine"]["kind"],
+            "node"
         );
     }
 }

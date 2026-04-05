@@ -178,6 +178,16 @@ Each machine descriptor carries:
 This lets the web UI show route choice and trust posture directly, instead of
 leaving users to infer it from sandbox toggles or raw node ids.
 
+Machine binding is now split across two levels:
+
+- the session stores the current machine actually in use
+- the workspace/project stores the preferred machine for future sessions
+
+That lets Moltis support sticky operator routing without collapsing everything
+into one mutable session-only setting. A workspace can remember "this codebase
+normally runs on the sandbox" or "this server workspace normally lands on this
+SSH target" while the current session still exposes its live route separately.
+
 ## Where To Go Next
 
 - [Usage Guide](usage-guide.md) for the day-to-day operator workflow

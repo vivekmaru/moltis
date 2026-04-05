@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use moltis_protocol::{ErrorShape, error_codes};
+use {
+    crate::state::GatewayState,
+    moltis_projects::Project,
+    moltis_protocol::{ErrorShape, error_codes},
+};
 
 use crate::{
     auth::{SshAuthMode, SshResolvedTarget, SshTargetEntry},
@@ -126,6 +130,62 @@ fn ssh_target_detail_json(target: &SshResolvedTarget) -> serde_json::Value {
     })
 }
 
+fn now_ms() -> u64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64
+}
+
+async fn persist_project_machine_binding(
+    state: &std::sync::Arc<GatewayState>,
+    session_key: &str,
+    machine_id: &str,
+) {
+    let Some(ref meta) = state.services.session_metadata else {
+        return;
+    };
+    let Some(entry) = meta.get(session_key).await else {
+        return;
+    };
+    let Some(project_id) = entry.project_id else {
+        return;
+    };
+
+    let project_value = match state
+        .services
+        .project
+        .get(serde_json::json!({ "id": project_id }))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(session_key, %error, "failed to load project for machine binding");
+            return;
+        },
+    };
+    let Some(mut project) = serde_json::from_value::<Option<Project>>(project_value)
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+
+    if project.preferred_machine_id.as_deref() == Some(machine_id) {
+        return;
+    }
+
+    project.preferred_machine_id = Some(machine_id.to_string());
+    project.updated_at = now_ms();
+    let payload = match serde_json::to_value(&project) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(project_id = %project.id, %error, "failed to serialize project update");
+            return;
+        },
+    };
+    if let Err(error) = state.services.project.upsert(payload).await {
+        tracing::warn!(project_id = %project.id, %error, "failed to persist project machine binding");
+    }
+}
+
 pub(super) fn register(reg: &mut MethodRegistry) {
     reg.register(
         "machines.list",
@@ -238,6 +298,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         resolved
                     },
                 };
+                persist_project_machine_binding(&ctx.state, session_key, &machine.id).await;
 
                 broadcast(
                     &ctx.state,
@@ -489,6 +550,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 meta.set_node_id(session_key, resolved_node_id.as_deref())
                     .await
                     .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                persist_project_machine_binding(
+                    &ctx.state,
+                    session_key,
+                    resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
+                )
+                .await;
                 Ok(serde_json::json!({ "ok": true, "node_id": resolved_node_id }))
             })
         }),
@@ -776,13 +843,17 @@ pub(super) fn register(reg: &mut MethodRegistry) {
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Instant};
 
-    use moltis_sessions::metadata::SqliteSessionMetadata;
+    use {
+        moltis_projects::{ProjectStore, SqliteProjectStore, store::new_project},
+        moltis_sessions::metadata::SqliteSessionMetadata,
+    };
 
     use {
         super::super::{MethodContext, MethodRegistry},
         crate::{
             auth::{AuthMode, ResolvedAuth},
             nodes::NodeSession,
+            project::LiveProjectService,
             services::GatewayServices,
             state::GatewayState,
         },
@@ -801,14 +872,21 @@ mod tests {
         pool
     }
 
-    fn test_state(metadata: Arc<SqliteSessionMetadata>) -> Arc<GatewayState> {
+    fn test_state(
+        metadata: Arc<SqliteSessionMetadata>,
+        project_service: Option<Arc<dyn crate::services::ProjectService>>,
+    ) -> Arc<GatewayState> {
+        let mut services = GatewayServices::noop().with_session_metadata(metadata);
+        if let Some(project) = project_service {
+            services = services.with_project(project);
+        }
         GatewayState::new(
             ResolvedAuth {
                 mode: AuthMode::Token,
                 token: None,
                 password: None,
             },
-            GatewayServices::noop().with_session_metadata(metadata),
+            services,
         )
     }
 
@@ -846,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn machines_list_includes_local_and_connected_nodes() {
         let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
-        let state = test_state(metadata);
+        let state = test_state(metadata, None);
         {
             let mut inner = state.inner.write().await;
             inner.nodes.register(test_node("node-z", "Zeta"));
@@ -893,7 +971,7 @@ mod tests {
     async fn machines_set_session_updates_session_binding() {
         let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
         metadata.upsert("main", None).await.expect("upsert session");
-        let state = test_state(Arc::clone(&metadata));
+        let state = test_state(Arc::clone(&metadata), None);
         {
             let mut inner = state.inner.write().await;
             inner.nodes.register(test_node("node-build", "Build box"));
@@ -927,5 +1005,53 @@ mod tests {
         let entry = metadata.get("main").await.expect("session entry");
         assert_eq!(entry.node_id.as_deref(), Some("node-build"));
         assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn machines_set_session_persists_workspace_preferred_machine() {
+        let pool = sqlite_pool().await;
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool.clone()));
+        let project_service = Arc::new(LiveProjectService::new(Arc::clone(&project_store)))
+            as Arc<dyn crate::services::ProjectService>;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.expect("upsert session");
+        project_store
+            .upsert(new_project("ops".into(), "Ops".into(), "/tmp/ops".into()))
+            .await
+            .expect("upsert project");
+        metadata
+            .set_project_id("main", Some("ops".to_string()))
+            .await;
+
+        let state = test_state(Arc::clone(&metadata), Some(project_service));
+        {
+            let mut inner = state.inner.write().await;
+            inner.nodes.register(test_node("node-ops", "Ops box"));
+        }
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-3".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "node-ops",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.set_session should succeed");
+        let project = project_store
+            .get("ops")
+            .await
+            .expect("get project")
+            .expect("project");
+        assert_eq!(project.preferred_machine_id.as_deref(), Some("node-ops"));
     }
 }

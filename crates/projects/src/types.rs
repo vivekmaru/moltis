@@ -21,6 +21,8 @@ pub struct Project {
     #[serde(default)]
     pub sandbox_image: Option<String>,
     #[serde(default)]
+    pub preferred_machine_id: Option<String>,
+    #[serde(default)]
     pub detected: bool,
     pub created_at: u64,
     pub updated_at: u64,
@@ -143,6 +145,7 @@ mod tests {
             teardown_command: None,
             branch_prefix: None,
             sandbox_image: None,
+            preferred_machine_id: None,
             detected: false,
             created_at: 0,
             updated_at: 0,

@@ -90,6 +90,17 @@ The intended workflow for Codex, Claude Code, or Copilot handoff is:
 4. Update the coordination loop when you make a decision or define the next
    action.
 
+Workspace binding now carries a machine default as well:
+
+- when you bind a session to a workspace, Moltis reapplies that workspace's
+  preferred machine if one is recorded
+- when you switch the machine for a workspace-bound session, Moltis persists
+  that choice back to the workspace so the next session starts from the same
+  execution route
+- the workspace overview shows the stored preferred machine separately from the
+  session's current route so you can tell whether you are using the workspace
+  default or a temporary override
+
 The first attach/import workflow is API- and RPC-based instead of editor-plugin
 based:
 
@@ -145,6 +156,11 @@ would run.
 
 The selector only appears when there is a meaningful choice to make. A
 single-machine session keeps the simpler local-host view.
+
+If the active session is bound to a workspace, machine selections become sticky
+at the workspace level. That is the intended default for repeat operator flows
+like a home server workspace that should keep landing on the same SSH target or
+paired node.
 
 ### Share access safely
 

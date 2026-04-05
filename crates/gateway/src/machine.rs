@@ -42,6 +42,16 @@ impl MachineKind {
     }
 }
 
+#[must_use]
+pub fn kind_from_machine_id(machine_id: &str) -> MachineKind {
+    match machine_id {
+        LOCAL_MACHINE_ID => MachineKind::Local,
+        SANDBOX_MACHINE_ID => MachineKind::Sandbox,
+        _ if machine_id.starts_with("ssh:") => MachineKind::Ssh,
+        _ => MachineKind::Node,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MachineTrustState {
@@ -335,6 +345,18 @@ pub async fn resolve_machine(
             .await
             .into_iter()
             .find(|machine| machine.id == machine_id),
+    }
+}
+
+#[must_use]
+pub fn session_binding_from_machine_id(
+    machine_id: &str,
+    sandbox_available: bool,
+) -> MachineDescriptor {
+    match kind_from_machine_id(machine_id) {
+        MachineKind::Local => MachineDescriptor::local(),
+        MachineKind::Sandbox => MachineDescriptor::sandbox(sandbox_available),
+        kind => MachineDescriptor::session_binding(kind, Some(machine_id), sandbox_available),
     }
 }
 
