@@ -1313,16 +1313,13 @@ pub async fn prepare_gateway(
                                 } else {
                                     entry.sandbox_enabled == Some(true)
                                 };
-                            let sandbox_available =
-                                moltis_gateway::machine::sandbox_router_available(
-                                    ws_state.sandbox_router.as_ref(),
-                                );
                             let machine_descriptor =
-                                moltis_gateway::machine::session_machine_descriptor(
+                                moltis_gateway::machine::live_session_machine_descriptor(
+                                    &ws_state,
                                     &entry,
                                     sandbox_active,
-                                    sandbox_available,
-                                );
+                                )
+                                .await;
                             let execution_route = machine_descriptor.execution_route;
                             let machine =
                                 serde_json::to_value(&machine_descriptor).unwrap_or_else(|_| {

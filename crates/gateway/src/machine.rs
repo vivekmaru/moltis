@@ -404,6 +404,43 @@ pub fn session_machine_descriptor(
     }
 }
 
+#[must_use]
+fn unavailable_session_machine_descriptor(
+    kind: MachineKind,
+    machine_id: Option<&str>,
+    sandbox_available: bool,
+) -> MachineDescriptor {
+    let mut machine = MachineDescriptor::session_binding(kind, None, sandbox_available);
+    if let Some(machine_id) = machine_id {
+        machine.id = machine_id.to_string();
+        machine.node_id = Some(machine_id.to_string());
+    }
+    machine
+}
+
+pub async fn live_session_machine_descriptor(
+    state: &Arc<GatewayState>,
+    entry: &SessionEntry,
+    sandbox_active: bool,
+) -> MachineDescriptor {
+    let sandbox_available = sandbox_machine_available(state);
+    let kind = session_machine_kind(entry, sandbox_active);
+    match kind {
+        MachineKind::Local => MachineDescriptor::local(),
+        MachineKind::Sandbox => MachineDescriptor::sandbox(sandbox_available),
+        _ => {
+            let machine_id = entry.node_id.as_deref();
+            if let Some(machine_id) = machine_id
+                && let Some(machine) = resolve_machine(state, machine_id).await
+            {
+                machine
+            } else {
+                unavailable_session_machine_descriptor(kind, machine_id, sandbox_available)
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, moltis_sessions::metadata::SessionEntry};
@@ -524,5 +561,37 @@ mod tests {
         assert_eq!(machine.kind, MachineKind::Ssh);
         assert_eq!(machine.id, "ssh:target:42");
         assert_eq!(machine.execution_route, "ssh");
+    }
+
+    #[tokio::test]
+    async fn live_session_machine_descriptor_marks_missing_node_unavailable() {
+        let metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new({
+            let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+                .await
+                .expect("sqlite pool");
+            moltis_projects::run_migrations(&pool)
+                .await
+                .expect("project migrations");
+            moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+                .await
+                .expect("session metadata init");
+            pool
+        }));
+        let state = GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop().with_session_metadata(metadata),
+        );
+        let mut entry = session_entry("main");
+        entry.node_id = Some("node-missing".to_string());
+
+        let machine = live_session_machine_descriptor(&state, &entry, false).await;
+        assert_eq!(machine.kind, MachineKind::Node);
+        assert_eq!(machine.id, "node-missing");
+        assert_eq!(machine.health, MachineHealth::Unavailable);
+        assert!(!machine.available);
     }
 }

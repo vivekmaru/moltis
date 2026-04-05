@@ -79,6 +79,7 @@ const READ_METHODS: &[&str] = &[
     "sessions.search",
     "sessions.branches",
     "sessions.run_detail",
+    "sessions.workspace_overview",
     "sessions.share.list",
     "projects.list",
     "projects.get",
@@ -187,6 +188,8 @@ const WRITE_METHODS: &[&str] = &[
     "channels.senders.deny",
     "sessions.switch",
     "sessions.fork",
+    "sessions.coordination.set",
+    "sessions.external.attach",
     "sessions.voice.generate",
     "sessions.clear_all",
     "sessions.share.create",
@@ -698,6 +701,36 @@ mod tests {
             ),
             "UNAUTHORIZED",
         );
+    }
+
+    #[test]
+    fn workspace_overview_requires_read() {
+        assert!(
+            authorize_method(
+                "sessions.workspace_overview",
+                "operator",
+                &scopes(&["operator.read"])
+            )
+            .is_none()
+        );
+        assert_error_code(
+            authorize_method("sessions.workspace_overview", "operator", &scopes(&[])),
+            "UNAUTHORIZED",
+        );
+    }
+
+    #[test]
+    fn session_coordination_write_methods_require_write() {
+        for method in &["sessions.coordination.set", "sessions.external.attach"] {
+            assert!(
+                authorize_method(method, "operator", &scopes(&["operator.write"])).is_none(),
+                "write scope should authorize {method}"
+            );
+            assert_error_code(
+                authorize_method(method, "operator", &scopes(&["operator.read"])),
+                "UNAUTHORIZED",
+            );
+        }
     }
 
     #[test]

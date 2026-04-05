@@ -609,18 +609,25 @@ function restoreSessionState(entry, projectId) {
 		var found = modelStore.getById(entry.model);
 		if (S.modelComboLabel) S.modelComboLabel.textContent = found ? found.displayName || found.id : entry.model;
 	}
-	updateSandboxUI(entry.sandbox_enabled !== false);
+	var restoredExecutionRoute =
+		entry.machine?.executionRoute ||
+		entry.machine?.route ||
+		entry.executionRoute ||
+		(entry.node_id ? (String(entry.node_id).startsWith("ssh:") ? "ssh" : "node") : null) ||
+		(entry.sandbox_enabled === true ? "sandbox" : "local");
+	var restoredSandboxRoute = restoredExecutionRoute === "sandbox";
+	updateSandboxUI(restoredSandboxRoute);
 	updateSandboxImageUI(entry.sandbox_image || null);
 	var sandboxRuntimeAvailable = (S.sandboxInfo?.backend || "none") !== "none";
-	var effectiveSandboxRoute = entry.sandbox_enabled !== false && sandboxRuntimeAvailable;
+	var effectiveSandboxRoute = restoredSandboxRoute && sandboxRuntimeAvailable;
 	S.setSessionExecMode(effectiveSandboxRoute ? "sandbox" : "host");
 	S.setSessionExecPromptSymbol(effectiveSandboxRoute || S.hostExecIsRoot ? "#" : "$");
 	updateCommandInputUI();
 	restoreMcpToggle(!entry.mcpDisabled);
 	var restoredMachineId =
 		entry.machine?.id ||
-		(entry.executionRoute === "sandbox" ? "sandbox" : null) ||
-		(entry.executionRoute === "local" ? "local" : null) ||
+		(restoredExecutionRoute === "sandbox" ? "sandbox" : null) ||
+		(restoredExecutionRoute === "local" ? "local" : null) ||
 		entry.node_id ||
 		(entry.sandbox_enabled === true ? "sandbox" : "local");
 	restoreMachineSelection(restoredMachineId);

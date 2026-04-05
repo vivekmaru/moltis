@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, Weak};
 
 use {
     async_trait::async_trait,
@@ -60,15 +60,6 @@ impl ExecutionRoute {
             Self::Sandbox => "sandbox",
             Self::Ssh => "ssh",
             Self::Node => "node",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Local => "Local host",
-            Self::Sandbox => "Sandbox",
-            Self::Ssh => "SSH target",
-            Self::Node => "Paired node",
         }
     }
 }
@@ -914,6 +905,7 @@ pub struct LiveSessionService {
     hook_registry: Option<Arc<HookRegistry>>,
     state_store: Option<Arc<SessionStateStore>>,
     browser_service: Option<Arc<dyn crate::services::BrowserService>>,
+    gateway_state: RwLock<Option<Weak<crate::state::GatewayState>>>,
 }
 
 impl LiveSessionService {
@@ -929,6 +921,7 @@ impl LiveSessionService {
             hook_registry: None,
             state_store: None,
             browser_service: None,
+            gateway_state: RwLock::new(None),
         }
     }
 
@@ -973,6 +966,21 @@ impl LiveSessionService {
     ) -> Self {
         self.browser_service = Some(browser);
         self
+    }
+
+    pub fn set_gateway_state(&self, state: Weak<crate::state::GatewayState>) {
+        *self
+            .gateway_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(state);
+    }
+
+    fn gateway_state(&self) -> Option<Arc<crate::state::GatewayState>> {
+        self.gateway_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     async fn default_agent_id(&self) -> String {
@@ -1233,64 +1241,16 @@ impl LiveSessionService {
             .collect()
     }
 
-    fn machine_payload(
-        route: ExecutionRoute,
-        entry: &SessionEntry,
-        sandbox_available: bool,
-    ) -> Value {
-        let (id, kind, trust_state, health, available) = match route {
-            ExecutionRoute::Local => ("local".to_string(), "local", "trusted_local", "ready", true),
-            ExecutionRoute::Sandbox => (
-                "sandbox".to_string(),
-                "sandbox",
-                "sandboxed",
-                if sandbox_available {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                sandbox_available,
-            ),
-            ExecutionRoute::Ssh => (
-                entry
-                    .node_id
-                    .clone()
-                    .unwrap_or_else(|| "ssh:unresolved".to_string()),
-                "ssh",
-                "managed_ssh",
-                if entry.node_id.is_some() {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                entry.node_id.is_some(),
-            ),
-            ExecutionRoute::Node => (
-                entry
-                    .node_id
-                    .clone()
-                    .unwrap_or_else(|| "node:unresolved".to_string()),
-                "node",
-                "paired_node",
-                if entry.node_id.is_some() {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                entry.node_id.is_some(),
-            ),
+    async fn machine_payload(&self, route: ExecutionRoute, entry: &SessionEntry) -> Value {
+        let sandbox_active = route == ExecutionRoute::Sandbox;
+        let machine = if let Some(state) = self.gateway_state() {
+            crate::machine::live_session_machine_descriptor(&state, entry, sandbox_active).await
+        } else {
+            let sandbox_available =
+                crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
+            crate::machine::session_machine_descriptor(entry, sandbox_active, sandbox_available)
         };
-        serde_json::json!({
-            "id": id,
-            "kind": kind,
-            "route": route.as_str(),
-            "executionRoute": route.as_str(),
-            "label": route.label(),
-            "nodeId": entry.node_id,
-            "trustState": trust_state,
-            "health": health,
-            "available": available,
-        })
+        serde_json::to_value(machine).unwrap_or(Value::Null)
     }
 
     async fn present_session_entry(
@@ -1302,8 +1262,6 @@ impl LiveSessionService {
     ) -> Value {
         let surface = infer_session_surface(entry);
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available =
-            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
         let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
         let external_source = normalize_session_source(entry.external_agent_source);
 
@@ -1335,7 +1293,7 @@ impl LiveSessionService {
             "surface": surface.surface,
             "sessionKind": surface.session_kind.as_str(),
             "executionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "machine": self.machine_payload(execution_route, entry).await,
             "externalAgentSource": external_source.as_str(),
             "version": entry.version,
         })
@@ -1406,16 +1364,13 @@ impl LiveSessionService {
 
         let approval_mode = moltis_config::discover_and_load().tools.exec.approval_mode;
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available =
-            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
-
         serde_json::json!({
             "workspaceId": entry.project_id,
             "workspaceLabel": self.workspace_label(entry.project_id.as_deref()).await,
             "linkedProject": linked_project,
             "currentBranch": entry.worktree_branch,
             "currentExecutionRoute": execution_route.as_str(),
-            "machine": Self::machine_payload(execution_route, entry, sandbox_available),
+            "machine": self.machine_payload(execution_route, entry).await,
             "approvalMode": approval_mode,
             "coordination": Self::coordination_payload(&coordination),
             "memorySummary": coordination.durable_notes,

@@ -2675,7 +2675,7 @@ pub async fn prepare_gateway_core(
         discover_and_build_hooks(&persisted_disabled, Some(&session_store)).await;
 
     // Wire live session service with sandbox router, project store, hooks, and browser.
-    {
+    let live_session_service = {
         let mut session_svc =
             LiveSessionService::new(Arc::clone(&session_store), Arc::clone(&session_metadata))
                 .with_tts_service(Arc::clone(&services.tts))
@@ -2688,8 +2688,9 @@ pub async fn prepare_gateway_core(
         if let Some(ref hooks) = hook_registry {
             session_svc = session_svc.with_hooks(Arc::clone(hooks));
         }
-        services.session = Arc::new(session_svc);
-    }
+        Arc::new(session_svc)
+    };
+    services.session = live_session_service.clone();
 
     // ── Memory system initialization ─────────────────────────────────────
     let memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>> = {
@@ -3111,6 +3112,7 @@ pub async fn prepare_gateway_core(
         #[cfg(feature = "vault")]
         vault.clone(),
     );
+    live_session_service.set_gateway_state(Arc::downgrade(&state));
     startup_mem_probe.checkpoint("gateway_state.created");
 
     #[cfg(feature = "tailscale")]

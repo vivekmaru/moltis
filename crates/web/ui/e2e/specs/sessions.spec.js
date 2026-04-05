@@ -773,6 +773,8 @@ test.describe("Session management", () => {
 				{ id: "sandbox", label: "Sandbox", kind: "sandbox", available: true, health: "ready" },
 			]);
 			machineStoreModule.select("sandbox");
+			stateModule.setSessionExecMode("sandbox");
+			stateModule.setSessionExecPromptSymbol("#");
 
 			function parseRpcPayload(payload) {
 				try {
@@ -817,13 +819,51 @@ test.describe("Session management", () => {
 					}
 					return undefined;
 				}
+				if (parsed?.method === "chat.context") {
+					const responder = stateModule.pending[parsed.id];
+					if (responder) {
+						responder({
+							ok: true,
+							payload: {
+								supportsTools: true,
+								execution: {
+									mode: "host",
+									route: "local",
+									hostIsRoot: false,
+									isRoot: false,
+									promptSymbol: "$",
+								},
+							},
+						});
+						delete stateModule.pending[parsed.id];
+					}
+					return undefined;
+				}
 				return window.__origSessionsSwitchSend(payload);
 			};
 
 			sessionsModule.switchSession("main");
 		});
 
-		await expect(page.locator("#nodeComboLabel")).toHaveText("Local host");
+		await expect
+			.poll(() => {
+				return page.evaluate(async () => {
+					const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+					if (!appScript) throw new Error("app module script not found");
+					const appUrl = new URL(appScript.src, window.location.origin);
+					const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+					const [stateModule, machineStoreModule] = await Promise.all([
+						import(`${prefix}js/state.js`),
+						import(`${prefix}js/stores/machine-store.js`),
+					]);
+					return {
+						label: machineStoreModule.selectedMachine.value?.label || "Local host",
+						mode: stateModule.sessionExecMode,
+						prompt: stateModule.sessionExecPromptSymbol,
+					};
+				});
+			})
+			.toEqual({ label: "Local host", mode: "host", prompt: "$" });
 		expect(pageErrors).toEqual([]);
 	});
 });
