@@ -1302,7 +1302,8 @@ impl LiveSessionService {
     ) -> Value {
         let surface = infer_session_surface(entry);
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available = self.sandbox_router.is_some();
+        let sandbox_available =
+            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
         let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
         let external_source = normalize_session_source(entry.external_agent_source);
 
@@ -1358,7 +1359,7 @@ impl LiveSessionService {
                             "preferredMachineId": preferred_machine_id,
                             "preferredMachine": Self::preferred_machine_payload(
                                 preferred_machine_id.as_deref(),
-                                self.sandbox_router.is_some(),
+                                crate::machine::sandbox_router_available(self.sandbox_router.as_ref()),
                             ),
                         })
                     })
@@ -1405,7 +1406,8 @@ impl LiveSessionService {
 
         let approval_mode = moltis_config::discover_and_load().tools.exec.approval_mode;
         let execution_route = self.effective_execution_route(entry).await;
-        let sandbox_available = self.sandbox_router.is_some();
+        let sandbox_available =
+            crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
 
         serde_json::json!({
             "workspaceId": entry.project_id,

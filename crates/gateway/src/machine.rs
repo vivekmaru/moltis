@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use serde::Serialize;
+use {moltis_tools::sandbox::SandboxRouter, serde::Serialize};
 
 use crate::{
     auth::{SshAuthMode, SshTargetEntry},
@@ -286,11 +286,21 @@ pub fn ssh_node_id(target: &str) -> String {
     crate::node_exec::ssh_node_id(target)
 }
 
+#[must_use]
+pub fn sandbox_router_available(router: Option<&Arc<SandboxRouter>>) -> bool {
+    router.is_some_and(|router| router.backend().is_real())
+}
+
+#[must_use]
+pub fn sandbox_machine_available(state: &GatewayState) -> bool {
+    sandbox_router_available(state.sandbox_router.as_ref())
+}
+
 pub async fn list_machines(state: &Arc<GatewayState>) -> Vec<MachineDescriptor> {
     let mut machines = vec![MachineDescriptor::local()];
 
     if state.sandbox_router.is_some() {
-        machines.push(MachineDescriptor::sandbox(true));
+        machines.push(MachineDescriptor::sandbox(sandbox_machine_available(state)));
     }
 
     let mut node_machines = {
@@ -336,7 +346,7 @@ pub async fn resolve_machine(
         LOCAL_MACHINE_ID => Some(MachineDescriptor::local()),
         SANDBOX_MACHINE_ID => {
             if state.sandbox_router.is_some() {
-                Some(MachineDescriptor::sandbox(true))
+                Some(MachineDescriptor::sandbox(sandbox_machine_available(state)))
             } else {
                 None
             }

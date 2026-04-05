@@ -263,10 +263,13 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
                             })?;
                         meta.set_sandbox_enabled(session_key, Some(false)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, false).await;
+                        }
                         MachineDescriptor::local()
                     },
                     SANDBOX_MACHINE_ID => {
-                        if ctx.state.sandbox_router.is_none() {
+                        if !crate::machine::sandbox_machine_available(&ctx.state) {
                             return Err(ErrorShape::new(
                                 error_codes::INVALID_REQUEST,
                                 "sandbox machine is not available",
@@ -278,6 +281,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
                             })?;
                         meta.set_sandbox_enabled(session_key, Some(true)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, true).await;
+                        }
                         MachineDescriptor::sandbox(true)
                     },
                     _ => {
@@ -295,6 +301,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
                             })?;
                         meta.set_sandbox_enabled(session_key, Some(false)).await;
+                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
+                            router.set_override(session_key, false).await;
+                        }
                         resolved
                     },
                 };
@@ -846,6 +855,7 @@ mod tests {
     use {
         moltis_projects::{ProjectStore, SqliteProjectStore, store::new_project},
         moltis_sessions::metadata::SqliteSessionMetadata,
+        moltis_tools::sandbox::{NoSandbox, RestrictedHostSandbox, SandboxConfig, SandboxRouter},
     };
 
     use {
@@ -872,22 +882,48 @@ mod tests {
         pool
     }
 
-    fn test_state(
+    fn test_state_with_router(
         metadata: Arc<SqliteSessionMetadata>,
         project_service: Option<Arc<dyn crate::services::ProjectService>>,
+        sandbox_router: Option<Arc<SandboxRouter>>,
     ) -> Arc<GatewayState> {
         let mut services = GatewayServices::noop().with_session_metadata(metadata);
         if let Some(project) = project_service {
             services = services.with_project(project);
         }
-        GatewayState::new(
+        GatewayState::with_options(
             ResolvedAuth {
                 mode: AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
+            sandbox_router,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            18789,
+            false,
+            None,
+            None,
+            #[cfg(feature = "metrics")]
+            None,
+            #[cfg(feature = "metrics")]
+            None,
+            #[cfg(feature = "vault")]
+            None,
         )
+    }
+
+    fn test_state(
+        metadata: Arc<SqliteSessionMetadata>,
+        project_service: Option<Arc<dyn crate::services::ProjectService>>,
+    ) -> Arc<GatewayState> {
+        test_state_with_router(metadata, project_service, None)
     }
 
     fn operator_scopes(scope: &str) -> Vec<String> {
@@ -1005,6 +1041,90 @@ mod tests {
         let entry = metadata.get("main").await.expect("session entry");
         assert_eq!(entry.node_id.as_deref(), Some("node-build"));
         assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn machines_set_session_updates_sandbox_router_override() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        metadata.upsert("main", None).await.expect("upsert session");
+        let config = SandboxConfig::default();
+        let router = Arc::new(SandboxRouter::with_backend(
+            config.clone(),
+            Arc::new(RestrictedHostSandbox::new(config)),
+        ));
+        let state = test_state_with_router(Arc::clone(&metadata), None, Some(Arc::clone(&router)));
+
+        let reg = MethodRegistry::new();
+        let sandbox_response = reg
+            .dispatch(MethodContext {
+                request_id: "req-sandbox".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "sandbox",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state: Arc::clone(&state),
+                channel: None,
+            })
+            .await;
+
+        assert!(sandbox_response.ok, "sandbox machine switch should succeed");
+        assert!(router.is_sandboxed("main").await);
+
+        let local_response = reg
+            .dispatch(MethodContext {
+                request_id: "req-local".into(),
+                method: "machines.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "machineId": "local",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(local_response.ok, "local machine switch should succeed");
+        assert!(!router.is_sandboxed("main").await);
+    }
+
+    #[tokio::test]
+    async fn machines_list_marks_sandbox_unavailable_without_real_backend() {
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let config = SandboxConfig::default();
+        let router = Arc::new(SandboxRouter::with_backend(config, Arc::new(NoSandbox)));
+        let state = test_state_with_router(metadata, None, Some(router));
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-sandbox-list".into(),
+                method: "machines.list".into(),
+                params: serde_json::json!({}),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.read"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "machines.list should succeed");
+        let payload = response.payload.expect("payload");
+        let sandbox = payload
+            .as_array()
+            .expect("machine list")
+            .iter()
+            .find(|item| item.get("id").and_then(|value| value.as_str()) == Some("sandbox"))
+            .expect("sandbox machine present");
+        assert_eq!(sandbox["available"], false);
+        assert_eq!(sandbox["health"], "unavailable");
     }
 
     #[tokio::test]
