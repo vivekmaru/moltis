@@ -1242,8 +1242,24 @@ impl LiveSessionService {
     }
 
     async fn machine_payload(&self, route: ExecutionRoute, entry: &SessionEntry) -> Value {
+        self.machine_payload_with_inventory(route, entry, None)
+            .await
+    }
+
+    async fn machine_payload_with_inventory(
+        &self,
+        route: ExecutionRoute,
+        entry: &SessionEntry,
+        inventory: Option<&crate::machine::MachineInventorySnapshot>,
+    ) -> Value {
         let sandbox_active = route == ExecutionRoute::Sandbox;
-        let machine = if let Some(state) = self.gateway_state() {
+        let machine = if let Some(inventory) = inventory {
+            crate::machine::live_session_machine_descriptor_for_inventory(
+                inventory,
+                entry,
+                sandbox_active,
+            )
+        } else if let Some(state) = self.gateway_state() {
             crate::machine::live_session_machine_descriptor(&state, entry, sandbox_active).await
         } else {
             let sandbox_available =
@@ -1259,6 +1275,7 @@ impl LiveSessionService {
         preview: Option<&str>,
         active_channel: bool,
         agent_id: Option<String>,
+        inventory: Option<&crate::machine::MachineInventorySnapshot>,
     ) -> Value {
         let surface = infer_session_surface(entry);
         let execution_route = self.effective_execution_route(entry).await;
@@ -1293,7 +1310,9 @@ impl LiveSessionService {
             "surface": surface.surface,
             "sessionKind": surface.session_kind.as_str(),
             "executionRoute": execution_route.as_str(),
-            "machine": self.machine_payload(execution_route, entry).await,
+            "machine": self
+                .machine_payload_with_inventory(execution_route, entry, inventory)
+                .await,
             "externalAgentSource": external_source.as_str(),
             "version": entry.version,
         })
@@ -1388,6 +1407,11 @@ impl LiveSessionService {
 impl SessionService for LiveSessionService {
     async fn list(&self) -> ServiceResult {
         let all = self.metadata.list().await;
+        let machine_inventory = if let Some(state) = self.gateway_state() {
+            Some(crate::machine::machine_inventory_snapshot(&state).await)
+        } else {
+            None
+        };
 
         let mut entries: Vec<Value> = Vec::with_capacity(all.len());
         for mut e in all {
@@ -1432,8 +1456,14 @@ impl SessionService for LiveSessionService {
                 .map(|p| truncate_preview(p, SESSION_PREVIEW_MAX_CHARS));
 
             entries.push(
-                self.present_session_entry(&e, preview.as_deref(), active_channel, Some(agent_id))
-                    .await,
+                self.present_session_entry(
+                    &e,
+                    preview.as_deref(),
+                    active_channel,
+                    Some(agent_id),
+                    machine_inventory.as_ref(),
+                )
+                .await,
             );
         }
         Ok(serde_json::json!(entries))
@@ -1495,6 +1525,7 @@ impl SessionService for LiveSessionService {
                         entry.preview.as_deref(),
                         self.is_active_channel_session(&entry).await,
                         entry.agent_id.clone(),
+                        None,
                     )
                     .await,
                 "history": [],
@@ -1535,6 +1566,7 @@ impl SessionService for LiveSessionService {
                     entry.preview.as_deref(),
                     self.is_active_channel_session(&entry).await,
                     entry.agent_id.clone(),
+                    None,
                 )
                 .await,
             "history": history,
@@ -1643,6 +1675,7 @@ impl SessionService for LiveSessionService {
                 entry.preview.as_deref(),
                 self.is_active_channel_session(&entry).await,
                 entry.agent_id.clone(),
+                None,
             )
             .await)
     }
@@ -2261,6 +2294,7 @@ impl SessionService for LiveSessionService {
                 final_entry.preview.as_deref(),
                 self.is_active_channel_session(&final_entry).await,
                 final_entry.agent_id.clone(),
+                None,
             )
             .await;
         if let Some(obj) = payload.as_object_mut() {
