@@ -1257,6 +1257,27 @@ async fn resolve_execution_context(
     ResolvedExecutionContext { route, machine }
 }
 
+fn default_connected_node_id(
+    session_entry: Option<&SessionEntry>,
+    route: ExecutionRoute,
+) -> Option<String> {
+    match route {
+        ExecutionRoute::Node => session_entry.and_then(|entry| entry.node_id.clone()),
+        ExecutionRoute::Local | ExecutionRoute::Sandbox | ExecutionRoute::Ssh => None,
+    }
+}
+
+fn recent_session_summary_payload(entry: &SessionEntry, route: ExecutionRoute) -> Value {
+    serde_json::json!({
+        "key": entry.key,
+        "label": entry.label,
+        "updatedAt": entry.updated_at,
+        "messageCount": entry.message_count,
+        "executionRoute": route.as_str(),
+        "externalAgentSource": normalize_external_agent_source(entry.external_agent_source).as_str(),
+    })
+}
+
 fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
     match route {
         ExecutionRoute::Sandbox => "sandbox",
@@ -1416,7 +1437,7 @@ async fn build_prompt_runtime_context(
     let nodes_ctx = if connected.is_empty() {
         None
     } else {
-        let default_node_id = session_entry.and_then(|e| e.node_id.clone());
+        let default_node_id = default_connected_node_id(session_entry, execution_context.route);
         Some(PromptNodesRuntimeContext {
             nodes: connected
                 .into_iter()
@@ -4788,14 +4809,7 @@ impl ChatService for LiveChatService {
                 .take(6)
             {
                 let route = effective_execution_route(&self.state, &entry.key, Some(&entry)).await;
-                sessions.push(serde_json::json!({
-                    "key": entry.key,
-                    "label": entry.label,
-                    "updatedAt": entry.updated_at,
-                    "messageCount": entry.message_count,
-                    "executionRoute": route.as_str(),
-                    "externalAgentSource": normalize_external_agent_source(entry.external_agent_source).as_str(),
-                }));
+                sessions.push(recent_session_summary_payload(&entry, route));
             }
             sessions
         } else {
@@ -9616,6 +9630,42 @@ mod tests {
             Some(true)
         );
         assert_eq!(execution_root_for_route(ExecutionRoute::Node, None), None);
+    }
+
+    #[test]
+    fn default_connected_node_id_only_uses_paired_node_route() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node-1".to_string());
+        assert_eq!(
+            default_connected_node_id(Some(&entry), ExecutionRoute::Node),
+            Some("node-1".to_string())
+        );
+        assert_eq!(
+            default_connected_node_id(Some(&entry), ExecutionRoute::Ssh),
+            None
+        );
+        assert_eq!(
+            default_connected_node_id(Some(&entry), ExecutionRoute::Sandbox),
+            None
+        );
+    }
+
+    #[test]
+    fn recent_session_summary_payload_uses_normalized_source_and_route() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "main".to_string();
+        entry.label = Some("Main".to_string());
+        entry.updated_at = 42;
+        entry.message_count = 7;
+        entry.external_agent_source = Some(ExternalAgentSource::ClaudeCode);
+
+        let summary = recent_session_summary_payload(&entry, ExecutionRoute::Ssh);
+        assert_eq!(summary["key"], "main");
+        assert_eq!(summary["label"], "Main");
+        assert_eq!(summary["updatedAt"], 42);
+        assert_eq!(summary["messageCount"], 7);
+        assert_eq!(summary["executionRoute"], "ssh");
+        assert_eq!(summary["externalAgentSource"], "claude_code");
     }
 
     #[tokio::test]
