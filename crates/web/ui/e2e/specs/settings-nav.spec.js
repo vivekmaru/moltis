@@ -220,6 +220,101 @@ test.describe("Settings navigation", () => {
 	test("tools settings shows effective inventory and routing summary", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/tools");
+		await waitForWsConnected(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const state = await import(`${prefix}js/state.js`);
+
+			const toolsPayload = {
+				supportsTools: true,
+				mcpDisabled: false,
+				session: {
+					model: "gpt-5.4",
+					provider: "openai",
+					label: "Main",
+				},
+				execution: {
+					mode: "host",
+					promptSymbol: "$",
+				},
+				sandbox: {
+					enabled: false,
+					backend: "none",
+				},
+				tools: [],
+				skills: [],
+				mcpServers: [],
+			};
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					available: true,
+				},
+				{
+					id: "sandbox",
+					kind: "sandbox",
+					label: "Sandbox",
+					executionRoute: "sandbox",
+					route: "sandbox",
+					available: true,
+				},
+				{
+					id: "node-build",
+					kind: "node",
+					label: "Build box",
+					executionRoute: "node",
+					route: "node",
+					available: true,
+				},
+				{
+					id: "ssh:prod",
+					kind: "ssh",
+					label: "SSH: prod",
+					executionRoute: "ssh",
+					route: "ssh",
+					available: true,
+				},
+			];
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function resolveRpc(parsed, responsePayload) {
+				const responder = state.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete state.pending[parsed.id];
+				}
+				return undefined;
+			}
+
+			if (!window.__toolsOverviewOrigSend) {
+				window.__toolsOverviewOrigSend = state.ws.send.bind(state.ws);
+			}
+
+			state.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__toolsOverviewOrigSend(payload);
+				if (parsed.method === "chat.context") return resolveRpc(parsed, toolsPayload);
+				if (parsed.method === "machines.list") return resolveRpc(parsed, machinesPayload);
+				return window.__toolsOverviewOrigSend(payload);
+			};
+		});
+
+		await page.getByRole("button", { name: "Refresh", exact: true }).click();
 
 		await expect(page.getByRole("heading", { name: "Tools", exact: true })).toBeVisible();
 		await expect(
@@ -229,6 +324,7 @@ test.describe("Settings navigation", () => {
 		).toBeVisible();
 		await expect(page.getByText("Tool Calling", { exact: true })).toBeVisible();
 		await expect(page.getByText("Execution Routes", { exact: true })).toBeVisible();
+		await expect(page.getByText("1 paired node · 1 SSH target", { exact: false })).toBeVisible();
 		await expect(page.getByText("Registered Tools", { exact: true })).toBeVisible();
 
 		expect(pageErrors).toEqual([]);

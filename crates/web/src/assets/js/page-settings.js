@@ -291,11 +291,13 @@ function summarizeRemoteExecInventory(entries) {
 	var summary = { pairedNodes: 0, sshTargets: 0 };
 	(entries || []).forEach((entry) => {
 		if (!entry || typeof entry !== "object") return;
-		if (entry.platform === "ssh") {
+		if (entry.kind === "ssh") {
 			summary.sshTargets += 1;
 			return;
 		}
-		summary.pairedNodes += 1;
+		if (entry.kind === "node") {
+			summary.pairedNodes += 1;
+		}
 	});
 	return summary;
 }
@@ -1730,26 +1732,28 @@ function VaultSection() {
 function ToolsSection() {
 	var [loadingTools, setLoadingTools] = useState(true);
 	var [toolData, setToolData] = useState(null);
-	var [nodeInventory, setNodeInventory] = useState([]);
+	var [machineInventory, setMachineInventory] = useState([]);
 	var [toolsErr, setToolsErr] = useState(null);
 
 	function loadToolsOverview() {
 		setLoadingTools(true);
 		setToolsErr(null);
-		Promise.allSettled([sendRpc("chat.context", {}), sendRpc("node.list", {})])
+		Promise.allSettled([sendRpc("chat.context", {}), sendRpc("machines.list", {})])
 			.then((results) => {
 				var contextResult = results[0];
 				if (contextResult.status !== "fulfilled" || !contextResult.value?.ok) {
 					throw new Error(contextResult.value?.error?.message || "Failed to load tools overview.");
 				}
 				var nextToolData = contextResult.value.payload || {};
-				var nodesResult = results[1];
-				var nextNodeInventory =
-					nodesResult.status === "fulfilled" && nodesResult.value?.ok && Array.isArray(nodesResult.value.payload)
-						? nodesResult.value.payload
+				var machinesResult = results[1];
+				var nextMachineInventory =
+					machinesResult.status === "fulfilled" &&
+					machinesResult.value?.ok &&
+					Array.isArray(machinesResult.value.payload)
+						? machinesResult.value.payload
 						: [];
 				setToolData(nextToolData);
-				setNodeInventory(nextNodeInventory);
+				setMachineInventory(nextMachineInventory);
 				setLoadingTools(false);
 			})
 			.catch((error) => {
@@ -1774,7 +1778,7 @@ function ToolsSection() {
 	var mcpServers = Array.isArray(data.mcpServers) ? data.mcpServers : [];
 	var runningMcpServers = mcpServers.filter((entry) => entry?.state === "running");
 	var runningMcpToolCount = runningMcpServers.reduce((sum, entry) => sum + (Number(entry?.tool_count) || 0), 0);
-	var remoteExecInventory = summarizeRemoteExecInventory(nodeInventory);
+	var remoteExecInventory = summarizeRemoteExecInventory(machineInventory);
 	var routeDetails = [];
 	routeDetails.push(execution.mode === "sandbox" ? "sandboxed commands" : "host commands");
 	if (remoteExecInventory.pairedNodes > 0) {
