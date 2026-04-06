@@ -79,12 +79,19 @@ function machineOptionLabel(machine) {
 	return machine.label || machine.id || "Local host";
 }
 
+function selectableNonLocalMachines(machineOptions) {
+	return (machineOptions || []).filter(
+		(machine) => machine?.id && machine.id !== "local" && machine.available !== false,
+	);
+}
+
 function buildMachinePickerState(machineOptions, currentMachineId, switchingMachine) {
+	var selectableMachines = selectableNonLocalMachines(machineOptions);
 	var hasCurrentMachineOption =
-		currentMachineId === "local" || machineOptions.some((machine) => machine.id === currentMachineId);
+		currentMachineId === "local" || selectableMachines.some((machine) => machine.id === currentMachineId);
 	var options = [
 		{ value: "local", label: "Local host" },
-		...machineOptions.map((machine) => ({
+		...selectableMachines.map((machine) => ({
 			value: machine.id,
 			label: machineOptionLabel(machine),
 		})),
@@ -579,9 +586,17 @@ function switchSessionAgent(nextAgentId, currentAgentId, switchingAgent, setSwit
 		});
 }
 
-function switchSessionMachine(nextMachineId, switchingMachine, setSwitchingMachine, currentKey, session) {
+function switchSessionMachine(
+	nextMachineId,
+	currentMachineId,
+	switchingMachine,
+	setSwitchingMachine,
+	currentKey,
+	session,
+) {
 	if (switchingMachine) return;
 	var targetMachineId = nextMachineId || "local";
+	if (targetMachineId === currentMachineId) return;
 	setSwitchingMachine(true);
 	sendRpc("machines.set_session", {
 		session_key: currentKey,
@@ -650,7 +665,8 @@ function showAgentPickerForSession(isCron, agentOptionsLoaded, agentOptions, age
 }
 
 function showMachinePickerForSession(isCron, machineOptions, currentMachineId) {
-	return !isCron && (machineOptions.length > 1 || Boolean(currentMachineId && currentMachineId !== "local"));
+	var selectableMachines = selectableNonLocalMachines(machineOptions);
+	return !isCron && (selectableMachines.length > 0 || Boolean(currentMachineId && currentMachineId !== "local"));
 }
 
 export function SessionHeader({
@@ -773,9 +789,9 @@ export function SessionHeader({
 
 	var onNodeChange = useCallback(
 		(nextMachineId) => {
-			switchSessionMachine(nextMachineId, switchingMachine, setSwitchingMachine, currentKey, session);
+			switchSessionMachine(nextMachineId, currentMachineId, switchingMachine, setSwitchingMachine, currentKey, session);
 		},
-		[currentKey, session, switchingMachine],
+		[currentKey, currentMachineId, session, switchingMachine],
 	);
 
 	var agentSelectValue = currentAgentId;

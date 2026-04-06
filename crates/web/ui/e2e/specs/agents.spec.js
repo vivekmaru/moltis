@@ -236,6 +236,17 @@ test.describe("Agents settings page", () => {
 					available: true,
 					nodeId: null,
 				},
+				{
+					id: "sandbox-offline",
+					kind: "sandbox",
+					label: "Offline route",
+					executionRoute: "sandbox",
+					route: "sandbox",
+					trustState: "sandboxed",
+					health: "unavailable",
+					available: false,
+					nodeId: null,
+				},
 			];
 
 			function parseRpcPayload(payload) {
@@ -292,6 +303,8 @@ test.describe("Agents settings page", () => {
 		await machineComboBtn.click();
 		const machineDropdown = machineCombo.locator(".model-dropdown");
 		await expect(machineDropdown).toBeVisible({ timeout: 10_000 });
+		await expect(machineDropdown.locator(".model-dropdown-item", { hasText: "Local host" })).toHaveCount(1);
+		await expect(machineDropdown.locator(".model-dropdown-item", { hasText: "Offline route" })).toHaveCount(0);
 		const sandboxOption = machineDropdown.locator(".model-dropdown-item", { hasText: "Sandbox" }).first();
 		await expect(sandboxOption).toBeVisible({ timeout: 10_000 });
 		await sandboxOption.click();
@@ -303,17 +316,87 @@ test.describe("Agents settings page", () => {
 					return {
 						machineId: session?.machine?.id || null,
 						executionRoute: session?.executionRoute || null,
-						sandboxEnabled: session?.sandbox_enabled === true,
 					};
 				});
 			})
 			.toEqual({
 				machineId: "sandbox",
 				executionRoute: "sandbox",
-				sandboxEnabled: true,
 			});
 
 		await expect(page.locator("#sessionHeaderToolbarMount")).toContainText("Sandbox");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("session header machine selector hides when only unavailable alternate machines exist", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const state = await import(`${prefix}js/state.js`);
+
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					nodeId: null,
+				},
+				{
+					id: "sandbox",
+					kind: "sandbox",
+					label: "Sandbox",
+					executionRoute: "sandbox",
+					route: "sandbox",
+					trustState: "sandboxed",
+					health: "unavailable",
+					available: false,
+					nodeId: null,
+				},
+			];
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function resolveRpc(parsed, responsePayload) {
+				const responder = state.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete state.pending[parsed.id];
+				}
+				return undefined;
+			}
+
+			if (!window.__sessionHeaderUnavailableMachineOrigSend) {
+				window.__sessionHeaderUnavailableMachineOrigSend = state.ws.send.bind(state.ws);
+			}
+
+			state.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__sessionHeaderUnavailableMachineOrigSend(payload);
+				if (parsed.method === "machines.list") return resolveRpc(parsed, machinesPayload);
+				return window.__sessionHeaderUnavailableMachineOrigSend(payload);
+			};
+		});
+
+		await createSession(page);
+		await expect(page.locator("#sessionHeaderToolbarMount .model-combo")).toHaveCount(1);
 		expect(pageErrors).toEqual([]);
 	});
 
