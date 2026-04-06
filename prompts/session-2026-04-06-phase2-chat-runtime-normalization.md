@@ -41,6 +41,11 @@ Sixth slice on the same branch:
 - exposed `sandbox.available` from the normalized machine payload for fallback sandbox sessions
 - added focused coverage for the no-router sandbox fallback path
 
+Review follow-up on the same branch:
+
+- fixed `chat.context().sandbox.available` to report actual sandbox capability rather than the current execution machine's availability
+- added a regression test for local sessions without a sandbox router so they keep `sandbox.available = false` even when the local machine is available
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -55,6 +60,7 @@ Sixth slice on the same branch:
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
 - `cargo test -p moltis-chat sandbox_info_payload_uses_normalized_sandbox_route_without_router`
+- `cargo test -p moltis-chat sandbox_info_payload_keeps_local_sessions_sandbox_unavailable_without_router`
 - `git diff --check`
 
 Validation blocked in this environment for the UI/docs slice:

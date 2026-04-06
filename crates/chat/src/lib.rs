@@ -1323,11 +1323,7 @@ async fn sandbox_info_payload(
     execution_context: &ResolvedExecutionContext,
 ) -> Value {
     let sandbox_enabled = execution_context.route == ExecutionRoute::Sandbox;
-    let sandbox_available = execution_context
-        .machine
-        .get("available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let sandbox_available = sandbox_machine_available(state);
 
     if let Some(router) = state.sandbox_router() {
         let config = router.config();
@@ -9889,6 +9885,28 @@ mod tests {
             sandbox_info_payload(&runtime, &entry.key, Some(&entry), &execution_context).await;
 
         assert_eq!(sandbox_info["enabled"], true);
+        assert_eq!(sandbox_info["available"], false);
+        assert_eq!(sandbox_info["backend"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn sandbox_info_payload_keeps_local_sessions_sandbox_unavailable_without_router() {
+        let runtime = mock_runtime();
+        let entry = make_session_entry_with_binding(None);
+
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            None,
+        )
+        .await;
+        let sandbox_info =
+            sandbox_info_payload(&runtime, &entry.key, Some(&entry), &execution_context).await;
+
+        assert_eq!(execution_context.route, ExecutionRoute::Local);
+        assert_eq!(execution_context.machine["available"], true);
+        assert_eq!(sandbox_info["enabled"], false);
         assert_eq!(sandbox_info["available"], false);
         assert_eq!(sandbox_info["backend"], Value::Null);
     }
