@@ -15,6 +15,13 @@ Use Moltis as the always-on backend for coding sessions:
 This is a good fit when you want the model runtime to stay warm and durable
 while clients come and go.
 
+The product direction here is closer to "coding coordinator" than "editor
+replacement":
+
+- external tools can still do the hands-on coding
+- Moltis keeps the durable workspace, machine, and memory state
+- important work gets attached back into the same long-lived operator context
+
 ## Remote Execution Fabric
 
 Moltis can route command execution through:
@@ -26,6 +33,9 @@ Moltis can route command execution through:
 
 That makes it useful for build servers, homelab machines, and GPU boxes where
 the planning interface lives in one place but execution happens elsewhere.
+
+This is one of the strongest non-chat use cases for Moltis today: one place to
+see and control where actions will run before the agent starts issuing them.
 
 ## Long-Lived Operational Automation
 
@@ -52,6 +62,10 @@ Moltis as the MCP aggregation layer:
 
 This works well when you have a mix of GitHub, databases, internal APIs, and
 custom automation servers.
+
+In practice this is often the lowest-friction way to integrate Moltis with
+existing agent ecosystems: use shared instruction files for context and MCP for
+tool compatibility.
 
 ## Channel-Driven Inbox Assistant
 

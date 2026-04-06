@@ -5,10 +5,14 @@ Running an AI assistant on your own machine or server is still new territory. Tr
 ```
 
 <div style="text-align: center; margin: 2em 0;">
-<strong style="font-size: 1.2em;">A secure persistent personal agent server written in Rust.<br>One binary, no runtime, no npm.</strong>
+<strong style="font-size: 1.2em;">A secure self-hosted agent control plane written in Rust.<br>Persistent workspaces, explicit execution routing, one binary.</strong>
 </div>
 
-Moltis compiles your entire AI gateway — web UI, LLM providers, tools, and all assets — into a single self-contained executable. There's no Node.js to babysit, no `node_modules` to sync, no V8 garbage collector introducing latency spikes.
+Moltis compiles your entire AI gateway — web UI, LLM providers, tools, memory,
+and routing surfaces — into a single self-contained executable. The goal is
+not "yet another chat wrapper." The goal is a durable place where your agent
+keeps context, respects trust boundaries, and can act across projects and
+machines over time.
 
 ```bash
 # Quick install (macOS / Linux)
@@ -16,6 +20,15 @@ curl -fsSL https://www.moltis.org/install.sh | sh
 ```
 
 ## Why Moltis?
+
+Moltis is now organized around three first-class product objects:
+
+- **Workspaces** for project context, durable notes, and attached external work
+- **Machines** for explicit execution routing (`local`, `sandbox`, `ssh`, `node`)
+- **Runs / sessions** for the live conversation, checkpoints, and resumable work
+
+That is the center of gravity for the product today: trusted coding and
+operator workflows on hardware you control.
 
 | Feature | Moltis | Other Solutions |
 |---------|--------|-----------------|
@@ -30,6 +43,8 @@ curl -fsSL https://www.moltis.org/install.sh | sh
 - **Multiple LLM Providers** — Anthropic, OpenAI, Google Gemini, DeepSeek, Mistral, Groq, xAI, OpenRouter, Ollama, Local LLM, and more
 - **Streaming-First** — Responses appear as tokens arrive, not after completion
 - **Sandboxed Execution** — Commands run in isolated containers (Docker or Apple Container)
+- **Workspace Coordination** — Durable workspace state with machine defaults, external activity, and coordination notes
+- **Explicit Machine Routing** — Route execution locally, through a sandbox, to SSH, or to a paired node with visible health and trust posture
 - **MCP Support** — Connect to Model Context Protocol servers for extended capabilities
 - **Multi-Channel** — Web UI, Telegram, Discord, API access with synchronized responses
 - **Built-in Throttling** — Per-IP endpoint limits with strict login protection
@@ -58,7 +73,7 @@ On first launch:
 2. Enter the setup code printed in the terminal
 3. Create a password or register a passkey
 4. Add your LLM provider
-5. Start chatting
+5. Bind your first session to a workspace and choose an execution machine
 
 ```admonish note
 On first launch, Moltis prints a setup code in the terminal. Use that code to
@@ -78,23 +93,23 @@ is enforced on loopback and remote access alike.
      └─────────────┴─────────┬───┴─────────────┘
                              │
                              ▼
-        ┌───────────────────────────────┐
-        │       Moltis Gateway          │
-        │   ┌─────────┐ ┌───────────┐   │
-        │   │  Agent  │ │   Tools   │   │
-        │   │  Loop   │◄┤  Registry │   │
-        │   └────┬────┘ └───────────┘   │
-        │        │                      │
-        │   ┌────▼────────────────┐     │
-        │   │  Provider Registry  │     │
-        │   │ Anthropic·OpenAI·Gemini… │   │
-        │   └─────────────────────┘     │
-        └───────────────────────────────┘
-                        │
-                ┌───────▼───────┐
-                │    Sandbox    │
-                │ Docker/Apple  │
-                └───────────────┘
+        ┌──────────────────────────────────────┐
+        │            Moltis Gateway            │
+        │  Workspaces | Machines | Sessions    │
+        │   ┌─────────┐   ┌────────────────┐   │
+        │   │  Agent  │◄──┤ Tool / Route   │   │
+        │   │  Loop   │   │ Coordination   │   │
+        │   └────┬────┘   └────────────────┘   │
+        │        │                              │
+        │   ┌────▼──────────────────────────┐   │
+        │   │ Provider Registry + Memory    │   │
+        │   │ Codex·Copilot·OpenAI·Local…   │   │
+        │   └───────────────────────────────┘   │
+        └──────────────────────────────────────┘
+                          │
+             ┌────────────┼────────────┐
+             ▼            ▼            ▼
+          Local       Sandbox      SSH / Node
 ```
 
 ## Documentation

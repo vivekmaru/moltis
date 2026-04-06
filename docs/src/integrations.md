@@ -1,8 +1,11 @@
 # Integrations
 
 Moltis already overlaps with tools like Codex, Claude Code, Cursor, and MCP
-server ecosystems. This page separates what is already implemented from the
-next integrations that would make sense.
+server ecosystems. The important distinction is that Moltis is moving toward a
+**coordination role**, not a duplicate full client for each ecosystem.
+
+This page separates what is already implemented from the next integrations that
+would make sense.
 
 ## Existing Integrations
 
@@ -64,6 +67,16 @@ Use Codex CLI, browser sessions, or mobile access as clients while Moltis owns:
 This keeps the durable state in one place instead of scattering it across
 several short-lived clients.
 
+In current-product terms, this means Moltis owns:
+
+- the workspace
+- the machine selection and trust posture
+- the durable session timeline
+- the memory and coordinator notes
+
+while Codex / Claude Code / Copilot can still own parts of the hands-on coding
+experience.
+
 The current coordinator workflow is intentionally lightweight:
 
 - external tools keep doing the actual coding
@@ -115,6 +128,20 @@ fully implemented yet:
    resumed in Moltis with explicit branch and checkpoint metadata.
 4. **Approval/status bridges** so external coding clients can see pending
    approvals and execution route state without needing the full Moltis web UI.
+
+## Where This Is Headed
+
+The direction is not "make Moltis imitate every editor agent."
+
+The direction is:
+
+- let other agent clients keep their strengths
+- let Moltis be the durable control plane behind them
+- keep trust boundaries, routing, memory, and session continuity in one place
+
+That is why the current integration work starts with shared context formats,
+MCP, attach/import flows, and explicit session metadata rather than deep
+editor-specific plugins first.
 
 ## Recommendation
 

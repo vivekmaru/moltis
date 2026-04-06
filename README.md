@@ -2,9 +2,9 @@
 
 <a href="https://moltis.org"><img src="https://raw.githubusercontent.com/moltis-org/moltis/main/website/favicon.svg" alt="Moltis" width="64"></a>
 
-# Moltis — A secure persistent personal agent server in Rust
+# Moltis — A secure self-hosted agent control plane in Rust
 
-One binary — sandboxed, secure, yours.
+One binary — persistent, routed, yours.
 
 [![CI](https://github.com/moltis-org/moltis/actions/workflows/ci.yml/badge.svg)](https://github.com/moltis-org/moltis/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/moltis-org/moltis/graph/badge.svg)](https://codecov.io/gh/moltis-org/moltis)
@@ -25,7 +25,9 @@ Moltis recently hit [the front page of Hacker News](https://news.ycombinator.com
 
 **Your hardware** — Runs on a Mac Mini, a Raspberry Pi, or any server you own. One Rust binary, no Node.js, no npm, no runtime.
 
-**Full-featured** — Voice, memory, cross-session recall, automatic edit checkpoints, scheduling, Telegram, Discord, browser automation, MCP servers, SSH or node-backed remote exec, managed deploy keys with host pinning in the web UI, a live Settings → Tools inventory, Cursor-compatible project context, and context-file threat scanning — all built-in. No plugin marketplace to get supply-chain attacked through.
+**Product direction** — Moltis is no longer best described as a generic chat server. It is a durable control plane for coding and operator workflows: workspaces, explicit execution machines, persistent sessions, memory, approvals, and external-agent handoff all live in one place.
+
+**Full-featured** — Voice, memory, cross-session recall, automatic edit checkpoints, scheduling, Telegram, Discord, browser automation, MCP servers, SSH or node-backed remote exec, managed deploy keys with host pinning in the web UI, a live Settings → Tools inventory, shared coding-agent context files, and context-file threat scanning — all built-in. No plugin marketplace to get supply-chain attacked through.
 
 **Auditable** — The agent loop + provider model fits in ~5K lines. The system is split across modular Rust crates so the gateway, auth, providers, tools, and storage layers can be audited independently.
 
@@ -122,6 +124,8 @@ See [Security Architecture](https://docs.moltis.org/security.html) for details.
 ## Features
 
 - **AI Gateway** — Multi-provider LLM support (OpenAI Codex, GitHub Copilot, Local), streaming responses, agent loop with sub-agent delegation, parallel tool execution
+- **Workspace + Machine Model** — Sessions now expose workspace, execution route, source, and normalized machine posture instead of hiding them in scattered flags
+- **Coordinator Workflow** — Durable decision/plan/next-action notes plus attached external Codex / Claude Code / Copilot work
 - **Communication** — Web UI, Telegram, Microsoft Teams, Discord, API access, voice I/O (8 TTS + 7 STT providers), mobile PWA with push notifications
 - **Memory & Recall** — Per-agent memory workspaces, embeddings-powered long-term memory, hybrid vector + full-text search, session persistence with auto-compaction, cross-session recall, Cursor-compatible project context, context-file safety scanning
 - **Safer Agent Editing** — Automatic checkpoints before built-in skill and memory mutations, restore tooling, session branching
@@ -131,9 +135,9 @@ See [Security Architecture](https://docs.moltis.org/security.html) for details.
 
 ## How It Works
 
-Moltis is a **local-first persistent agent server** — a single Rust binary that
-sits between you and multiple LLM providers, keeps durable session state, and
-can meet you across channels without handing your data to a cloud relay.
+Moltis is a **self-hosted agent runtime and control plane**. A single Rust
+binary sits between you and multiple LLM providers, keeps durable session and
+workspace state, and coordinates where actions actually run.
 
 ```
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
@@ -143,34 +147,34 @@ can meet you across channels without handing your data to a cloud relay.
        └────────┬───────┴────────┬───────┘
                 │   WebSocket    │
                 ▼                ▼
-        ┌─────────────────────────────────┐
-        │          Gateway Server         │
-        │   (Axum · HTTP · WS · Auth)     │
-        ├─────────────────────────────────┤
-        │        Chat Service             │
-        │  ┌───────────┐ ┌─────────────┐  │
-        │  │   Agent   │ │    Tool     │  │
-        │  │   Runner  │◄┤   Registry  │  │
-        │  └─────┬─────┘ └─────────────┘  │
-        │        │                        │
-        │  ┌─────▼─────────────────────┐  │
-        │  │    Provider Registry      │  │
-        │  │  Multiple providers       │  │
-        │  │  (Codex · Copilot · Local)│  │
-        │  └───────────────────────────┘  │
-        ├─────────────────────────────────┤
-        │  Sessions  │ Memory  │  Hooks   │
-        │  (JSONL)   │ (SQLite)│ (events) │
-        └─────────────────────────────────┘
-                       │
-               ┌───────▼───────┐
-               │    Sandbox    │
-               │ Docker/Apple  │
-               │  Container    │
-               └───────────────┘
+        ┌──────────────────────────────────────┐
+        │            Gateway Server            │
+        │       (HTTP · WS · Auth · RPC)       │
+        ├──────────────────────────────────────┤
+        │  Workspaces | Machines | Sessions    │
+        │   ┌───────────┐ ┌────────────────┐   │
+        │   │   Agent   │ │ Tool / Route   │   │
+        │   │   Runner  │◄┤ Coordination   │   │
+        │   └─────┬─────┘ └────────────────┘   │
+        │         │                             │
+        │  ┌──────▼─────────────────────────┐   │
+        │  │ Providers + Memory + Hooks     │   │
+        │  │ Codex · Copilot · OpenAI · ... │   │
+        │  └────────────────────────────────┘   │
+        └──────────────────────────────────────┘
+                     │          │
+              ┌──────▼───┐  ┌──▼──────────┐
+              │ Sandbox  │  │ SSH / Nodes │
+              └──────────┘  └─────────────┘
 ```
 
-See [Quickstart](https://docs.moltis.org/quickstart.html) for gateway startup, message flow, sessions, and memory details.
+The important product objects now are:
+
+- **Workspaces** for project context, durable notes, and attached external work
+- **Machines** for explicit execution routing and trust posture
+- **Sessions** for the live run, checkpoints, and resumable conversation
+
+See [Quickstart](https://docs.moltis.org/quickstart.html) and [Usage Guide](https://docs.moltis.org/usage-guide.html) for the operator-plus-coding workflow this supports.
 
 ## Getting Started
 
