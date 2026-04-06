@@ -31,3 +31,15 @@ Cleanup slice on the same branch:
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/agents.spec.js --grep "session header machine selector switches execution machine"`
 - `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/page-settings.js crates/web/ui/e2e/specs/settings-nav.spec.js`
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/settings-nav.spec.js --grep "tools settings shows effective inventory and routing summary"`
+
+## Review Follow-up
+
+Addressed the remaining PR review note on the same branch:
+
+- `crates/web/src/assets/js/components/session-header.js` now calls `updateSandboxUI(...)` after a successful `machines.set_session` switch so the live execution prompt and command mode update immediately when leaving sandbox
+- `crates/web/ui/e2e/specs/agents.spec.js` now includes a regression proving the header machine selector flips the active session and command execution state back to host when switching from sandbox to local
+
+Additional validation for the follow-up:
+
+- `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/components/session-header.js crates/web/ui/e2e/specs/agents.spec.js`
+- `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/agents.spec.js --grep "session header machine selector"`

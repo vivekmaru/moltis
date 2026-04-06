@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { onEvent } from "../events.js";
 import * as gon from "../gon.js";
 import { parseAgentsListPayload, sendRpc } from "../helpers.js";
+import { updateSandboxUI } from "../sandbox.js";
 import {
 	clearActiveSession,
 	fetchSessions,
@@ -615,6 +616,10 @@ function switchSessionMachine(
 					res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route || "local";
 				session.dataVersion.value++;
 			}
+			updateSandboxUI(
+				(res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route) ===
+					"sandbox",
+			);
 			fetchSessions();
 		})
 		.finally(() => {
