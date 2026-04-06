@@ -11,6 +11,11 @@ import { parseAgentsListPayload, sendRpc } from "../helpers.js";
 import { restoreMachineSelection } from "../machine-selector.js";
 import { updateSandboxUI } from "../sandbox.js";
 import {
+	applySessionMachinePayload,
+	resolveSessionExecutionRoute,
+	resolveSessionMachineId,
+} from "../session-machine.js";
+import {
 	clearActiveSession,
 	fetchSessions,
 	setSessionActiveRunId,
@@ -610,17 +615,10 @@ function switchSessionMachine(
 				return;
 			}
 			if (session) {
-				session.machine = res.payload?.machine || session.machine || null;
-				session.node_id = res.payload?.node_id || null;
-				session.sandbox_enabled = res.payload?.sandbox_enabled;
-				session.executionRoute =
-					res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route || "local";
+				applySessionMachinePayload(session, res.payload);
 				session.dataVersion.value++;
 			}
-			updateSandboxUI(
-				(res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route) ===
-					"sandbox",
-			);
+			updateSandboxUI(resolveSessionExecutionRoute(res.payload) === "sandbox");
 			restoreMachineSelection(res.payload?.machine?.id || targetMachineId);
 			fetchSessions();
 		})
@@ -644,14 +642,9 @@ function getSessionHeaderDisplay(session, currentKey, nameOwnLine, defaultAgentI
 		replying: session?.replying.value,
 		activeRunId: session?.activeRunId.value || null,
 		currentAgentId: session?.agent_id || defaultAgentId || "main",
-		currentMachineId:
-			session?.machine?.id ||
-			(session?.executionRoute === "sandbox" ? "sandbox" : null) ||
-			(session?.executionRoute === "local" ? "local" : null) ||
-			session?.node_id ||
-			(session?.sandbox_enabled === true ? "sandbox" : "local"),
+		currentMachineId: resolveSessionMachineId(session),
 		workspaceLabel: session?.workspaceLabel || session?.workspace || "",
-		routeLabel: executionRouteLabel(session?.executionRoute || "local"),
+		routeLabel: executionRouteLabel(resolveSessionExecutionRoute(session)),
 		sourceLabel: externalSourceLabel(session?.externalAgentSource || "native"),
 	};
 }

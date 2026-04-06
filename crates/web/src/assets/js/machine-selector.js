@@ -1,6 +1,7 @@
 import { onEvent } from "./events.js";
 import { sendRpc } from "./helpers.js";
 import { updateSandboxUI } from "./sandbox.js";
+import { applySessionMachinePayload } from "./session-machine.js";
 import * as S from "./state.js";
 import { machineStore } from "./stores/machine-store.js";
 import { sessionStore } from "./stores/session-store.js";
@@ -37,10 +38,7 @@ function updateMachineComboLabel(machine) {
 function syncActiveSessionMachine(machine, payload) {
 	var session = sessionStore.getByKey(S.activeSessionKey);
 	if (!session) return;
-	session.machine = machine || null;
-	session.node_id = payload?.node_id || null;
-	session.sandbox_enabled = payload?.sandbox_enabled;
-	session.executionRoute = machine?.executionRoute || machine?.route || "local";
+	applySessionMachinePayload(session, payload, machine);
 	session.dataVersion.value++;
 }
 
