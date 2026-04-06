@@ -43,3 +43,8 @@ Additional validation for the follow-up:
 
 - `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/components/session-header.js crates/web/ui/e2e/specs/agents.spec.js`
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/agents.spec.js --grep "session header machine selector"`
+
+Second review follow-up on the same branch:
+
+- `crates/web/src/assets/js/components/session-header.js` now also calls `restoreMachineSelection(...)` after a successful header machine switch so the shared machine store and toolbar combo label stay aligned with the header selector
+- the existing `session header machine selector switches execution machine` E2E now asserts the toolbar machine label updates to the selected machine too

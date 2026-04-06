@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { onEvent } from "../events.js";
 import * as gon from "../gon.js";
 import { parseAgentsListPayload, sendRpc } from "../helpers.js";
+import { restoreMachineSelection } from "../machine-selector.js";
 import { updateSandboxUI } from "../sandbox.js";
 import {
 	clearActiveSession,
@@ -620,6 +621,7 @@ function switchSessionMachine(
 				(res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route) ===
 					"sandbox",
 			);
+			restoreMachineSelection(res.payload?.machine?.id || targetMachineId);
 			fetchSessions();
 		})
 		.finally(() => {

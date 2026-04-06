@@ -313,15 +313,18 @@ test.describe("Agents settings page", () => {
 			.poll(() => {
 				return page.evaluate(() => {
 					const session = window.__moltis_stores?.sessionStore?.activeSession?.value;
+					const toolbarLabel = document.getElementById("nodeComboLabel")?.textContent || "";
 					return {
 						machineId: session?.machine?.id || null,
 						executionRoute: session?.executionRoute || null,
+						toolbarLabel,
 					};
 				});
 			})
 			.toEqual({
 				machineId: "sandbox",
 				executionRoute: "sandbox",
+				toolbarLabel: "Sandbox",
 			});
 
 		await expect(page.locator("#sessionHeaderToolbarMount")).toContainText("Sandbox");
