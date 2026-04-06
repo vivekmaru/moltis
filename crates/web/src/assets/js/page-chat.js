@@ -238,6 +238,52 @@ function ctxSection(title) {
 	return sec;
 }
 
+function contextRouteLabel(route) {
+	switch (route) {
+		case "sandbox":
+			return "Sandbox";
+		case "ssh":
+			return "SSH";
+		case "node":
+			return "Node";
+		default:
+			return "Local";
+	}
+}
+
+function contextSourceLabel(source) {
+	switch (source) {
+		case "claude_code":
+			return "Claude Code";
+		case "copilot":
+			return "Copilot";
+		case "api":
+			return "API";
+		case "imported":
+			return "Imported";
+		case "codex":
+			return "Codex";
+		default:
+			return "Native";
+	}
+}
+
+function humanizeContextField(value) {
+	if (!value) return "";
+	return String(value)
+		.replaceAll("_", " ")
+		.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function contextMachineLabel(machine) {
+	if (!machine) return "";
+	var label = machine.label || machine.id || "";
+	if ((label === "Paired node" || label === "SSH target") && machine.id) {
+		return machine.id;
+	}
+	return label;
+}
+
 // ── Context card per-section renderers ───────────────────
 function renderContextSessionSection(card, data) {
 	var sess = data.session || {};
@@ -249,10 +295,10 @@ function renderContextSessionSection(card, data) {
 	if (sess.label) sessSection.appendChild(ctxRow("Label", sess.label));
 	if (sess.workspace) sessSection.appendChild(ctxRow("Workspace", sess.workspace));
 	if (sess.surface) sessSection.appendChild(ctxRow("Surface", sess.surface));
-	if (sess.executionRoute) sessSection.appendChild(ctxRow("Execution route", sess.executionRoute));
-	if (sess.machine?.label) sessSection.appendChild(ctxRow("Machine", sess.machine.label));
-	if (sess.machine?.trustState) sessSection.appendChild(ctxRow("Trust", sess.machine.trustState));
-	if (sess.externalAgentSource) sessSection.appendChild(ctxRow("Source", sess.externalAgentSource));
+	if (sess.executionRoute) sessSection.appendChild(ctxRow("Execution route", contextRouteLabel(sess.executionRoute)));
+	if (sess.machine) sessSection.appendChild(ctxRow("Machine", contextMachineLabel(sess.machine)));
+	if (sess.machine?.trustState) sessSection.appendChild(ctxRow("Trust", humanizeContextField(sess.machine.trustState)));
+	if (sess.externalAgentSource) sessSection.appendChild(ctxRow("Source", contextSourceLabel(sess.externalAgentSource)));
 	sessSection.appendChild(ctxRow("Tool Support", data.supportsTools === false ? "Disabled" : "Enabled"));
 	card.appendChild(sessSection);
 }
@@ -335,7 +381,10 @@ function renderExternalActivityRow(activity) {
 function renderRecentWorkspaceSessionRow(item) {
 	var row = ctxEl("div", "ctx-file");
 	row.appendChild(ctxEl("span", "ctx-file-path", item.label || item.key));
-	row.appendChild(ctxEl("span", "ctx-file-size", `${item.executionRoute} · ${item.externalAgentSource}`));
+	var meta = [contextRouteLabel(item.executionRoute)];
+	if (item.machine) meta.push(contextMachineLabel(item.machine));
+	if (item.externalAgentSource) meta.push(contextSourceLabel(item.externalAgentSource));
+	row.appendChild(ctxEl("span", "ctx-file-size", meta.join(" · ")));
 	return row;
 }
 

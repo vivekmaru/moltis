@@ -48,3 +48,21 @@ Validation for this slice:
 - `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/session-machine.js crates/web/src/assets/js/components/session-header.js crates/web/src/assets/js/machine-selector.js crates/web/ui/e2e/specs/agents.spec.js crates/web/ui/e2e/specs/sessions.spec.js`
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/agents.spec.js --grep "session header machine selector"`
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/sessions.spec.js --grep "session switch restores local machine from normalized execution route|session switch prefers normalized machine over conflicting legacy flags"`
+
+## Context Card Label Cleanup
+
+Aligned the in-chat `/context` card with the newer machine model so it no longer renders raw route/source enum values or generic machine placeholders.
+
+Updated `crates/web/src/assets/js/page-chat.js` to:
+
+- render user-facing route labels (`SSH`, `Sandbox`, `Local`) instead of raw route ids
+- render external agent sources as product labels (`Claude Code`, `Codex`, etc.)
+- prefer machine ids when the payload carries generic labels like `SSH target` or `Paired node`
+- include normalized machine/source metadata in the workspace recent-session rows inside the context card
+
+Added focused E2E coverage in `crates/web/ui/e2e/specs/chat-input.spec.js` that mocks `chat.context`, runs the real `/context` slash command, and verifies the rendered card shows normalized route, machine, trust, and source labels.
+
+Validation for this slice:
+
+- `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/page-chat.js crates/web/ui/e2e/specs/chat-input.spec.js`
+- `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/chat-input.spec.js --grep "/context shows normalized route, machine, and source labels"`
