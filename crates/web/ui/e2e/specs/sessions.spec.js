@@ -866,4 +866,125 @@ test.describe("Session management", () => {
 			.toEqual({ label: "Local host", mode: "host", prompt: "$" });
 		expect(pageErrors).toEqual([]);
 	});
+
+	test("session switch prefers normalized machine over conflicting legacy flags", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const [sessionsModule, machineStoreModule, stateModule] = await Promise.all([
+				import(`${prefix}js/sessions.js`),
+				import(`${prefix}js/stores/machine-store.js`),
+				import(`${prefix}js/state.js`),
+			]);
+
+			machineStoreModule.setAll([
+				{ id: "local", label: "Local host", kind: "local", available: true, health: "ready" },
+				{ id: "ssh:prod", label: "SSH: prod", kind: "ssh", available: true, health: "ready" },
+				{ id: "sandbox", label: "Sandbox", kind: "sandbox", available: true, health: "ready" },
+			]);
+			machineStoreModule.select("sandbox");
+			stateModule.setSessionExecMode("sandbox");
+			stateModule.setSessionExecPromptSymbol("#");
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			if (!window.__origSessionsSwitchMachineSend) {
+				window.__origSessionsSwitchMachineSend = stateModule.ws.send.bind(stateModule.ws);
+			}
+
+			stateModule.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (parsed?.method === "sessions.switch" && parsed?.params?.key === "main") {
+					const responder = stateModule.pending[parsed.id];
+					if (responder) {
+						responder({
+							ok: true,
+							payload: {
+								entry: {
+									key: "main",
+									label: "Main",
+									projectId: null,
+									sandbox_enabled: true,
+									sandbox_image: null,
+									worktree_branch: "",
+									mcpDisabled: false,
+									agent_id: "main",
+									agentId: "main",
+									node_id: "ssh:legacy",
+									executionRoute: "ssh",
+									machine: {
+										id: "ssh:prod",
+										label: "SSH: prod",
+										executionRoute: "ssh",
+										route: "ssh",
+									},
+									version: 1,
+								},
+								historyCacheHit: true,
+								history: [],
+							},
+						});
+						delete stateModule.pending[parsed.id];
+					}
+					return undefined;
+				}
+				if (parsed?.method === "chat.context") {
+					const responder = stateModule.pending[parsed.id];
+					if (responder) {
+						responder({
+							ok: true,
+							payload: {
+								supportsTools: true,
+								execution: {
+									mode: "host",
+									route: "ssh",
+									hostIsRoot: false,
+									isRoot: false,
+									promptSymbol: "$",
+								},
+							},
+						});
+						delete stateModule.pending[parsed.id];
+					}
+					return undefined;
+				}
+				return window.__origSessionsSwitchMachineSend(payload);
+			};
+
+			sessionsModule.switchSession("main");
+		});
+
+		await expect
+			.poll(() => {
+				return page.evaluate(async () => {
+					const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+					if (!appScript) throw new Error("app module script not found");
+					const appUrl = new URL(appScript.src, window.location.origin);
+					const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+					const [stateModule, machineStoreModule] = await Promise.all([
+						import(`${prefix}js/state.js`),
+						import(`${prefix}js/stores/machine-store.js`),
+					]);
+					return {
+						label: machineStoreModule.selectedMachine.value?.label || "Local host",
+						mode: stateModule.sessionExecMode,
+						prompt: stateModule.sessionExecPromptSymbol,
+					};
+				});
+			})
+			.toEqual({ label: "SSH: prod", mode: "host", prompt: "$" });
+		expect(pageErrors).toEqual([]);
+	});
 });
