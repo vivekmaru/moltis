@@ -3,6 +3,11 @@
 This page gives the high-level map of how Moltis is put together so you can
 orient quickly before diving into crate-level docs.
 
+If you knew an earlier version of Moltis, the main architectural shift is that
+the product is now explicitly organized around trusted coding and operator
+workflows. The broad capability surface is still there, but more of it now
+hangs off a clearer state model instead of reading like independent features.
+
 ## Design Goals
 
 Moltis is built around four goals:
@@ -12,6 +17,12 @@ Moltis is built around four goals:
    remote execution, and external channels.
 3. Let capabilities compose without turning the codebase into one giant crate.
 4. Preserve enough state to feel persistent without hiding critical behavior.
+
+The practical product thesis behind those goals is:
+
+> Moltis is the long-lived memory, policy, and execution layer for your
+> projects and machines. Agent clients come and go; Moltis keeps the context
+> and trust boundaries stable.
 
 ## Runtime Layout
 
@@ -156,6 +167,10 @@ That state is consumed in three places:
 1. The web UI workspace overview
 2. Chat context inspection (`chat.context`)
 3. Prompt assembly, where coordinator notes are appended to project context
+
+That coordinator layer is the bridge between the older "persistent agent
+server" framing and the current "agent control plane" framing. It gives the
+product a place to keep durable work state that is not just raw transcript.
 
 ## Machine Inventory and Binding
 

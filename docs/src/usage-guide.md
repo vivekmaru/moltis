@@ -1,6 +1,14 @@
 # Usage Guide
 
 This guide focuses on the normal day-to-day workflow once Moltis is installed.
+At this point, the most useful way to think about Moltis is:
+
+- a **workspace** keeps durable context and coordinator state
+- a **machine** makes execution routing explicit
+- a **session** is the live run that ties those together
+
+The default workflow is no longer "open chat, ask anything." It is "open the
+right workspace, confirm the right machine, and continue real work."
 
 ## First Run
 
@@ -27,6 +35,8 @@ another on a local model.
 - Resume from the session list when you want previous context and checkpoints.
 - Use session branching when you want to explore an alternative path without
   overwriting the original thread.
+- Prefer continuing a workspace-bound session over creating throwaway threads
+  when the work has real history, decisions, or machine assumptions.
 
 ### 3. Attach project context
 
@@ -62,6 +72,9 @@ rule is simple:
 - keep sandboxing on unless you have a deliberate reason to relax it
 - make the execution route visible when using local, node, or SSH backends
 
+Moltis is strongest when you treat tool use as an operator workflow, not a
+hidden side effect of "chatting."
+
 ### 5. Save useful state
 
 Use memory when you want durable recall across sessions, and use checkpoints or
@@ -89,6 +102,15 @@ The intended workflow for Codex, Claude Code, or Copilot handoff is:
    Moltis web UI.
 4. Update the coordination loop when you make a decision or define the next
    action.
+
+The point is not to replace those coding tools. The point is to let Moltis own
+the durable state around them:
+
+- workspace identity
+- execution route
+- memory and notes
+- attached external work
+- resumable context for the next session
 
 Workspace binding now carries a machine default as well:
 
@@ -121,8 +143,11 @@ based:
 
 - Password or passkey enabled
 - Sandbox mode on
-- Local or SSH exec depending on your workflow
+- Local, sandbox, or SSH exec depending on your workflow
 - One or two trusted MCP servers instead of a large unmanaged set
+
+This is the best fit for the product today: a personal control plane for
+coding, homelab, and operator workflows on trusted hardware.
 
 ### Shared/internal server
 
@@ -190,6 +215,8 @@ session machine or start issuing operator tasks.
 - Prefer scoped API keys over reusing your browser session for automation.
 - Treat `Settings → Security`, `Settings → Tools`, and `moltis doctor` as part
   of normal maintenance.
+- Treat the workspace overview as your main pre-flight check before running
+  agent-driven operator tasks.
 
 ## Next Steps
 

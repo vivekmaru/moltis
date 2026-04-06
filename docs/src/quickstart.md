@@ -68,35 +68,46 @@ Or configure via the web UI: **Settings** → **Providers** → enter your API k
 
 See [Providers](providers.md) for the full list of supported providers.
 
-## 5. Chat!
+## 5. Start Your First Real Session
 
-Go to the **Chat** tab and start a conversation:
+Go to the **Chat** tab, create a session, and treat it as a workspace-backed
+run instead of a disposable chat.
+
+Recommended first steps:
+
+1. Bind the session to a project/workspace.
+2. Pick the execution machine explicitly.
+3. Open the workspace overview and confirm the current route.
+4. Start with a concrete task.
+
+Example:
 
 ```
-You: Write a Python function to check if a number is prime
-
-Agent: Here's a Python function to check if a number is prime:
-
-def is_prime(n):
-    if n < 2:
-        return False
-    for i in range(2, int(n ** 0.5) + 1):
-        if n % i == 0:
-            return False
-    return True
+You: Bind this session to my homelab workspace, keep it on the sandbox, and summarize the next three maintenance tasks.
 ```
 
 ## What's Next?
 
 ### Enable Tool Use
 
-Moltis can execute code, browse the web, and more. Tools are enabled by default with sandbox protection.
+Moltis can execute code, browse the web, and more. Tools are enabled by
+default with sandbox protection and explicit route selection.
 
 Try:
 
 ```
-You: Create a hello.py file that prints "Hello, World!" and run it
+You: Create a hello.py file, explain where you will run it, then execute it
 ```
+
+The important habit is to check **where** commands will run:
+
+- local host
+- sandbox
+- paired node
+- SSH target
+
+The workspace overview and machine selector are the main control surfaces for
+that.
 
 ### Connect Telegram
 
@@ -141,6 +152,19 @@ model = "text-embedding-3-small"
 ```
 
 Add knowledge by placing Markdown files in `~/.moltis/memory/`.
+
+### Attach External Agent Work
+
+If you also use Codex, Claude Code, or Copilot, Moltis can already act as the
+durable coordinator for that work.
+
+Use:
+
+- `sessions.external.attach` to record important work done outside the web UI
+- `sessions.coordination.set` to store the decision, plan, or next action
+
+That lets a new session recover the shape of the work without pretending every
+step happened inside one chat transcript.
 
 ## Useful Commands
 
