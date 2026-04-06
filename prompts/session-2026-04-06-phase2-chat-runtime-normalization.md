@@ -46,6 +46,12 @@ Review follow-up on the same branch:
 - fixed `chat.context().sandbox.available` to report actual sandbox capability rather than the current execution machine's availability
 - added a regression test for local sessions without a sandbox router so they keep `sandbox.available = false` even when the local machine is available
 
+Current follow-up branch (`feat/phase2-chat-followup`):
+
+- normalized the HTTPd WebSocket session-event payload in `crates/httpd/src/server.rs` so live session updates reuse a single helper instead of hand-assembling a drifted payload
+- added `workspaceLabel` to that live session-event payload so workspace-bound sessions keep their normalized label on live updates
+- kept the event path on the existing machine/session model and added a regression test for the missing workspace label
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -61,6 +67,8 @@ Review follow-up on the same branch:
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
 - `cargo test -p moltis-chat sandbox_info_payload_uses_normalized_sandbox_route_without_router`
 - `cargo test -p moltis-chat sandbox_info_payload_keeps_local_sessions_sandbox_unavailable_without_router`
+- `cargo test -p moltis-httpd --no-default-features present_session_event_entry_includes_workspace_label`
+- `cargo check -p moltis-httpd --no-default-features`
 - `git diff --check`
 
 Validation blocked in this environment for the UI/docs slice:

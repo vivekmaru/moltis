@@ -1256,117 +1256,7 @@ pub async fn prepare_gateway(
                             && let Some(ref metadata) = ws_state.services.session_metadata
                             && let Some(entry) = metadata.get(session_key).await
                         {
-                            let active_channel = if let Some(ref binding_json) =
-                                entry.channel_binding
-                            {
-                                if let Ok(target) = serde_json::from_str::<
-                                    moltis_channels::ChannelReplyTarget,
-                                >(binding_json)
-                                {
-                                    metadata
-                                        .get_active_session(
-                                            target.channel_type.as_str(),
-                                            &target.account_id,
-                                            &target.chat_id,
-                                            target.thread_id.as_deref(),
-                                        )
-                                        .await
-                                        .map(|key| key == entry.key)
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            };
-                            let preview = entry.preview.as_deref().map(|text| {
-                                let truncated = text.chars().take(200).collect::<String>();
-                                if text.chars().count() > 200 {
-                                    format!("{truncated}…")
-                                } else {
-                                    truncated
-                                }
-                            });
-                            let surface = if entry.key == "cron:heartbeat" {
-                                "heartbeat".to_string()
-                            } else if entry.key.starts_with("cron:") {
-                                "cron".to_string()
-                            } else if let Some(binding_json) = entry.channel_binding.as_deref() {
-                                serde_json::from_str::<moltis_channels::ChannelReplyTarget>(
-                                    binding_json,
-                                )
-                                .map(|binding| binding.channel_type.as_str().to_string())
-                                .unwrap_or_else(|_| "web".to_string())
-                            } else {
-                                "web".to_string()
-                            };
-                            let session_kind = if entry.key.starts_with("cron:") {
-                                "cron"
-                            } else if entry.channel_binding.is_some() {
-                                "channel"
-                            } else {
-                                "web"
-                            };
-                            let sandbox_active =
-                                if let Some(router) = ws_state.sandbox_router.as_ref() {
-                                    router.is_sandboxed(&entry.key).await
-                                } else {
-                                    entry.sandbox_enabled == Some(true)
-                                };
-                            let machine_descriptor =
-                                moltis_gateway::machine::live_session_machine_descriptor(
-                                    &ws_state,
-                                    &entry,
-                                    sandbox_active,
-                                )
-                                .await;
-                            let execution_route = machine_descriptor.execution_route;
-                            let machine =
-                                serde_json::to_value(&machine_descriptor).unwrap_or_else(|_| {
-                                    serde_json::json!({
-                                        "id": "local",
-                                        "kind": "local",
-                                        "route": "local",
-                                        "executionRoute": "local",
-                                        "label": "Local host",
-                                        "nodeId": serde_json::Value::Null,
-                                        "trustState": "trusted_local",
-                                        "health": "ready",
-                                        "available": true,
-                                    })
-                                });
-                            let agent_id = entry.agent_id.clone();
-                            payload["entry"] = serde_json::json!({
-                                "id": entry.id,
-                                "key": entry.key,
-                                "label": entry.label,
-                                "model": entry.model,
-                                "createdAt": entry.created_at,
-                                "updatedAt": entry.updated_at,
-                                "messageCount": entry.message_count,
-                                "lastSeenMessageCount": entry.last_seen_message_count,
-                                "projectId": entry.project_id,
-                                "sandbox_enabled": entry.sandbox_enabled,
-                                "sandbox_image": entry.sandbox_image,
-                                "worktree_branch": entry.worktree_branch,
-                                "channelBinding": entry.channel_binding,
-                                "activeChannel": active_channel,
-                                "parentSessionKey": entry.parent_session_key,
-                                "forkPoint": entry.fork_point,
-                                "mcpDisabled": entry.mcp_disabled,
-                                "preview": preview,
-                                "archived": entry.archived,
-                                "agent_id": agent_id.clone(),
-                                "agentId": agent_id,
-                                "node_id": entry.node_id,
-                                "workspace": entry.project_id,
-                                "surface": surface,
-                                "sessionKind": session_kind,
-                                "executionRoute": execution_route,
-                                "machine": machine,
-                                "externalAgentSource": entry.external_agent_source.unwrap_or_default().as_str(),
-                                "version": entry.version,
-                            });
+                            payload["entry"] = present_session_event_entry(&ws_state, &entry).await;
                         }
                         broadcast(&ws_state, "session", payload, BroadcastOpts {
                             drop_if_slow: true,
@@ -2668,6 +2558,156 @@ fn startup_setup_code_lines(code: &str) -> Vec<String> {
     ]
 }
 
+async fn session_event_active_channel(
+    state: &GatewayState,
+    entry: &moltis_sessions::metadata::SessionEntry,
+) -> bool {
+    let Some(ref metadata) = state.services.session_metadata else {
+        return false;
+    };
+    let Some(ref binding_json) = entry.channel_binding else {
+        return false;
+    };
+    let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+    else {
+        return false;
+    };
+
+    metadata
+        .get_active_session(
+            target.channel_type.as_str(),
+            &target.account_id,
+            &target.chat_id,
+            target.thread_id.as_deref(),
+        )
+        .await
+        .map(|key| key == entry.key)
+        .unwrap_or(false)
+}
+
+fn session_event_preview(preview: Option<&str>) -> Option<String> {
+    preview.map(|text| {
+        let truncated = text.chars().take(200).collect::<String>();
+        if text.chars().count() > 200 {
+            format!("{truncated}…")
+        } else {
+            truncated
+        }
+    })
+}
+
+fn session_event_surface(
+    entry: &moltis_sessions::metadata::SessionEntry,
+) -> (String, &'static str) {
+    if entry.key == "cron:heartbeat" {
+        return ("heartbeat".to_string(), "cron");
+    }
+    if entry.key.starts_with("cron:") {
+        return ("cron".to_string(), "cron");
+    }
+    if let Some(binding_json) = entry.channel_binding.as_deref() {
+        let surface = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+            .map(|binding| binding.channel_type.as_str().to_string())
+            .unwrap_or_else(|_| "web".to_string());
+        return (surface, "channel");
+    }
+    ("web".to_string(), "web")
+}
+
+async fn session_event_workspace_label(
+    state: &GatewayState,
+    project_id: Option<&str>,
+) -> Option<String> {
+    let project_id = project_id?;
+    state
+        .services
+        .project
+        .get(serde_json::json!({ "id": project_id }))
+        .await
+        .ok()
+        .and_then(|project| {
+            project
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+async fn session_event_sandbox_active(
+    state: &GatewayState,
+    entry: &moltis_sessions::metadata::SessionEntry,
+) -> bool {
+    if let Some(router) = state.sandbox_router.as_ref() {
+        router.is_sandboxed(&entry.key).await
+    } else {
+        entry.sandbox_enabled == Some(true)
+    }
+}
+
+async fn present_session_event_entry(
+    state: &Arc<GatewayState>,
+    entry: &moltis_sessions::metadata::SessionEntry,
+) -> serde_json::Value {
+    let (active_channel, workspace_label, sandbox_active) = tokio::join!(
+        session_event_active_channel(state, entry),
+        session_event_workspace_label(state, entry.project_id.as_deref()),
+        session_event_sandbox_active(state, entry),
+    );
+    let preview = session_event_preview(entry.preview.as_deref());
+    let (surface, session_kind) = session_event_surface(entry);
+    let machine_descriptor =
+        moltis_gateway::machine::live_session_machine_descriptor(state, entry, sandbox_active)
+            .await;
+    let execution_route = machine_descriptor.execution_route;
+    let machine = serde_json::to_value(&machine_descriptor).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": "local",
+            "kind": "local",
+            "route": "local",
+            "executionRoute": "local",
+            "label": "Local host",
+            "nodeId": serde_json::Value::Null,
+            "trustState": "trusted_local",
+            "health": "ready",
+            "available": true,
+        })
+    });
+    let agent_id = entry.agent_id.clone();
+
+    serde_json::json!({
+        "id": entry.id,
+        "key": entry.key,
+        "label": entry.label,
+        "model": entry.model,
+        "createdAt": entry.created_at,
+        "updatedAt": entry.updated_at,
+        "messageCount": entry.message_count,
+        "lastSeenMessageCount": entry.last_seen_message_count,
+        "projectId": entry.project_id,
+        "workspace": entry.project_id,
+        "workspaceLabel": workspace_label,
+        "sandbox_enabled": entry.sandbox_enabled,
+        "sandbox_image": entry.sandbox_image,
+        "worktree_branch": entry.worktree_branch,
+        "channelBinding": entry.channel_binding,
+        "activeChannel": active_channel,
+        "parentSessionKey": entry.parent_session_key,
+        "forkPoint": entry.fork_point,
+        "mcpDisabled": entry.mcp_disabled,
+        "preview": preview,
+        "archived": entry.archived,
+        "agent_id": agent_id.clone(),
+        "agentId": agent_id,
+        "node_id": entry.node_id,
+        "surface": surface,
+        "sessionKind": session_kind,
+        "executionRoute": execution_route,
+        "machine": machine,
+        "externalAgentSource": entry.external_agent_source.unwrap_or_default().as_str(),
+        "version": entry.version,
+    })
+}
+
 /// Check whether a WebSocket `Origin` header matches the request `Host`.
 ///
 /// Extracts the host portion of the origin URL and compares it to the Host
@@ -2733,7 +2773,57 @@ pub fn is_same_origin(origin: &str, host: &str) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, std::sync::Arc};
+
+    use {
+        async_trait::async_trait,
+        moltis_gateway::{
+            auth,
+            services::{ProjectService, ServiceResult},
+        },
+        moltis_sessions::metadata::SessionEntry,
+    };
+
+    struct MockProjectService;
+
+    #[async_trait]
+    impl ProjectService for MockProjectService {
+        async fn list(&self) -> ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn get(&self, params: serde_json::Value) -> ServiceResult {
+            let id = params.get("id").and_then(serde_json::Value::as_str);
+            if id == Some("ops") {
+                Ok(serde_json::json!({
+                    "id": "ops",
+                    "label": "Ops",
+                }))
+            } else {
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        async fn upsert(&self, _params: serde_json::Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn delete(&self, _params: serde_json::Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn detect(&self, _params: serde_json::Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn complete_path(&self, _params: serde_json::Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn context(&self, _params: serde_json::Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+    }
 
     #[test]
     fn same_origin_exact_match() {
@@ -2955,6 +3045,43 @@ mod tests {
             "enter this code to set your password or register a passkey",
             "",
         ]);
+    }
+
+    #[tokio::test]
+    async fn present_session_event_entry_includes_workspace_label() {
+        let services = moltis_gateway::services::GatewayServices::noop()
+            .with_project(Arc::new(MockProjectService));
+        let state = GatewayState::new(auth::resolve_auth(None, None), services);
+        let entry = SessionEntry {
+            id: "session-id".into(),
+            key: "main".into(),
+            label: Some("Main".into()),
+            model: Some("gpt-5.4".into()),
+            created_at: 1,
+            updated_at: 2,
+            message_count: 3,
+            last_seen_message_count: 1,
+            project_id: Some("ops".into()),
+            archived: false,
+            worktree_branch: None,
+            sandbox_enabled: Some(false),
+            sandbox_image: None,
+            channel_binding: None,
+            parent_session_key: None,
+            fork_point: None,
+            mcp_disabled: None,
+            preview: Some("A short preview".into()),
+            agent_id: None,
+            node_id: None,
+            external_agent_source: None,
+            version: 1,
+        };
+
+        let payload = present_session_event_entry(&state, &entry).await;
+
+        assert_eq!(payload["workspace"], "ops");
+        assert_eq!(payload["workspaceLabel"], "Ops");
+        assert_eq!(payload["machine"]["id"], "local");
     }
 
     #[cfg(feature = "ngrok")]
