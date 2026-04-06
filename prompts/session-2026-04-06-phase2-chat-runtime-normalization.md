@@ -29,6 +29,12 @@ Fourth slice on the same branch:
 - included normalized machine payloads in recent-session summaries so disconnected node bindings stay visibly unavailable there too
 - added focused coverage for normalized recent-session machine state
 
+Fifth slice on the same branch:
+
+- surfaced normalized recent-session machine state in the workspace overview UI
+- added operator-facing badges for recent session route, source, and machine health/trust
+- documented that recent workspace session cards now reflect normalized machine availability
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -42,3 +48,9 @@ Fourth slice on the same branch:
 - `cargo test -p moltis-chat resolve_execution_context_marks_disconnected_node_unavailable`
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
+- `git diff --check`
+
+Validation blocked in this environment for the UI/docs slice:
+
+- `biome check --write ...` could not run because `biome` is not on `PATH`
+- `cd crates/web/ui && npx playwright test e2e/specs/workspace-overview.spec.js` could not run because the Node runtime (`node`/`npx`) is not installed in this shell

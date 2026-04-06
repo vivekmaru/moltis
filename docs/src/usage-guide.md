@@ -100,6 +100,9 @@ Workspace binding now carries a machine default as well:
 - the workspace overview shows the stored preferred machine separately from the
   session's current route so you can tell whether you are using the workspace
   default or a temporary override
+- recent workspace session cards also show the normalized machine state for
+  each session, so disconnected node routes remain visibly unavailable instead
+  of looking like generic node bindings
 
 The first attach/import workflow is API- and RPC-based instead of editor-plugin
 based:

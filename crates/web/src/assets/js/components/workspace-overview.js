@@ -82,6 +82,13 @@ function machineTelemetryLabel(machine) {
 	return "";
 }
 
+function machineHealthTone(machine) {
+	if (machine?.health === "degraded") return "warn";
+	if (machine?.available === false) return "muted";
+	if (machine?.health === "ready") return "accent";
+	return "default";
+}
+
 function relativeTime(epochMs) {
 	if (!epochMs) return "";
 	return new Date(epochMs).toLocaleString(undefined, {
@@ -315,9 +322,28 @@ function RecentSessionsSection({ sessions }) {
 								<div class="flex items-start justify-between gap-3 text-xs">
 									<div class="min-w-0">
 										<div class="font-medium text-[var(--text)] truncate">${item.label || item.key}</div>
-										<div class="text-[var(--muted)]">
-											${routeLabel(item.executionRoute)} · ${sourceLabel(item.externalAgentSource)}
+										<div class="text-[var(--muted)] flex flex-wrap items-center gap-1.5">
+											<${InventoryBadge} tone="muted">${routeLabel(item.executionRoute)}</${InventoryBadge}>
+											<${InventoryBadge} tone="muted">${sourceLabel(item.externalAgentSource)}</${InventoryBadge}>
+											${
+												item.machine &&
+												html`<${InventoryBadge} tone=${machineHealthTone(item.machine)}>
+													${humanizeMachineField(item.machine.health || "unknown")}
+												</${InventoryBadge}>`
+											}
 										</div>
+										${
+											item.machine &&
+											html`<div class="text-[var(--muted)] mt-1">
+												${machineLabel(item.machine)}
+											</div>`
+										}
+										${
+											item.machine?.trustState &&
+											html`<div class="text-[var(--muted)]">
+												${humanizeMachineField(item.machine.trustState)}
+											</div>`
+										}
 									</div>
 									<div class="text-right text-[var(--muted)] shrink-0">
 										<div>${item.messageCount || 0} msgs</div>

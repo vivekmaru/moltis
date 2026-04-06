@@ -41,7 +41,27 @@ test.describe("Workspace overview", () => {
 				memorySummary: null,
 				externalActivities: [],
 				externalActivitySummary: { count: 0, sources: {} },
-				recentSessions: [],
+				recentSessions: [
+					{
+						key: "workspace-stale-node",
+						label: "Stale node session",
+						updatedAt: Date.now() - 60_000,
+						messageCount: 12,
+						executionRoute: "node",
+						externalAgentSource: "codex",
+						machine: {
+							id: "node:stale",
+							kind: "node",
+							label: "Paired node",
+							executionRoute: "node",
+							route: "node",
+							trustState: "paired_node",
+							health: "unavailable",
+							available: false,
+							nodeId: "node:stale",
+						},
+					},
+				],
 				machine: {
 					id: "local",
 					kind: "local",
@@ -208,6 +228,11 @@ test.describe("Workspace overview", () => {
 		await expect(chatMoreModal.getByText("Available Machines", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Build box", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Stale telemetry", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Recent Workspace Sessions", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Stale node session", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("node:stale (unavailable)", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Unavailable", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Paired Node", { exact: true })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
 });

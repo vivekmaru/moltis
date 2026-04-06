@@ -188,6 +188,10 @@ into one mutable session-only setting. A workspace can remember "this codebase
 normally runs on the sandbox" or "this server workspace normally lands on this
 SSH target" while the current session still exposes its live route separately.
 
+That same normalized machine object now flows into recent workspace session
+summaries as well, so operator-facing views are not forced to infer health from
+legacy `node_id` or sandbox flags when showing prior runs.
+
 The primary operator-facing surface for that model is the workspace overview in
 the chat controls. It combines:
 
