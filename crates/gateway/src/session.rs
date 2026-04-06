@@ -1241,11 +1241,6 @@ impl LiveSessionService {
             .collect()
     }
 
-    async fn machine_payload(&self, route: ExecutionRoute, entry: &SessionEntry) -> Value {
-        self.machine_payload_with_inventory(route, entry, None)
-            .await
-    }
-
     async fn machine_payload_with_inventory(
         &self,
         route: ExecutionRoute,
@@ -1320,6 +1315,11 @@ impl LiveSessionService {
 
     async fn workspace_overview_for_entry(&self, entry: &SessionEntry) -> Value {
         let coordination = self.load_coordination(&entry.key).await;
+        let machine_inventory = if let Some(state) = self.gateway_state() {
+            Some(crate::machine::machine_inventory_snapshot(&state).await)
+        } else {
+            None
+        };
         let linked_project = if let Some(project_id) = entry.project_id.as_deref() {
             if let Some(ref project_store) = self.project_store {
                 project_store
@@ -1359,12 +1359,16 @@ impl LiveSessionService {
                 .take(6)
             {
                 let route = self.effective_execution_route(&recent).await;
+                let machine = self
+                    .machine_payload_with_inventory(route, &recent, machine_inventory.as_ref())
+                    .await;
                 items.push(serde_json::json!({
                     "key": recent.key,
                     "label": recent.label,
                     "updatedAt": recent.updated_at,
                     "messageCount": recent.message_count,
                     "executionRoute": route.as_str(),
+                    "machine": machine,
                     "externalAgentSource": normalize_session_source(recent.external_agent_source).as_str(),
                 }));
             }
@@ -1389,7 +1393,9 @@ impl LiveSessionService {
             "linkedProject": linked_project,
             "currentBranch": entry.worktree_branch,
             "currentExecutionRoute": execution_route.as_str(),
-            "machine": self.machine_payload(execution_route, entry).await,
+            "machine": self
+                .machine_payload_with_inventory(execution_route, entry, machine_inventory.as_ref())
+                .await,
             "approvalMode": approval_mode,
             "coordination": Self::coordination_payload(&coordination),
             "memorySummary": coordination.durable_notes,
@@ -3568,5 +3574,45 @@ mod tests {
             overview["linkedProject"]["preferredMachine"]["kind"],
             "node"
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_overview_recent_sessions_include_machine_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+
+        metadata.upsert("main", None).await.unwrap();
+        metadata.upsert("sandboxed", None).await.unwrap();
+
+        let project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project_store.upsert(project).await.unwrap();
+        metadata
+            .set_project_id("main", Some("ops".to_string()))
+            .await;
+        metadata
+            .set_project_id("sandboxed", Some("ops".to_string()))
+            .await;
+        metadata.set_sandbox_enabled("sandboxed", Some(true)).await;
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let overview = svc
+            .workspace_overview(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let recent = overview["recentSessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "sandboxed")
+            .unwrap();
+        assert_eq!(recent["executionRoute"], "sandbox");
+        assert_eq!(recent["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+        assert_eq!(recent["machine"]["executionRoute"], "sandbox");
+        assert_eq!(recent["machine"]["available"], false);
     }
 }
