@@ -1287,13 +1287,17 @@ fn default_connected_node_id(
     }
 }
 
-fn recent_session_summary_payload(entry: &SessionEntry, route: ExecutionRoute) -> Value {
+fn recent_session_summary_payload(
+    entry: &SessionEntry,
+    execution_context: &ResolvedExecutionContext,
+) -> Value {
     serde_json::json!({
         "key": entry.key,
         "label": entry.label,
         "updatedAt": entry.updated_at,
         "messageCount": entry.message_count,
-        "executionRoute": route.as_str(),
+        "executionRoute": execution_context.route.as_str(),
+        "machine": execution_context.machine,
         "externalAgentSource": normalize_external_agent_source(entry.external_agent_source).as_str(),
     })
 }
@@ -4840,8 +4844,14 @@ impl ChatService for LiveChatService {
                 .filter(|entry| entry.project_id.as_deref() == Some(project_id))
                 .take(6)
             {
-                let route = effective_execution_route(&self.state, &entry.key, Some(&entry)).await;
-                sessions.push(recent_session_summary_payload(&entry, route));
+                let execution_context = resolve_execution_context_with_connected_nodes(
+                    &self.state,
+                    &entry.key,
+                    Some(&entry),
+                    Some(&connected_nodes),
+                )
+                .await;
+                sessions.push(recent_session_summary_payload(&entry, &execution_context));
             }
             sessions
         } else {
@@ -9697,14 +9707,47 @@ mod tests {
         entry.updated_at = 42;
         entry.message_count = 7;
         entry.external_agent_source = Some(ExternalAgentSource::ClaudeCode);
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Ssh,
+            machine: serde_json::json!({
+                "id": "ssh:target:42",
+                "executionRoute": "ssh",
+                "kind": "ssh",
+                "available": true,
+            }),
+        };
 
-        let summary = recent_session_summary_payload(&entry, ExecutionRoute::Ssh);
+        let summary = recent_session_summary_payload(&entry, &execution_context);
         assert_eq!(summary["key"], "main");
         assert_eq!(summary["label"], "Main");
         assert_eq!(summary["updatedAt"], 42);
         assert_eq!(summary["messageCount"], 7);
         assert_eq!(summary["executionRoute"], "ssh");
+        assert_eq!(summary["machine"]["id"], "ssh:target:42");
         assert_eq!(summary["externalAgentSource"], "claude_code");
+    }
+
+    #[tokio::test]
+    async fn recent_session_summary_payload_uses_normalized_machine_state() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "worker".to_string();
+        entry.node_id = Some("node:missing".to_string());
+
+        let connected_nodes = vec![connected_node_summary("node:other")];
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        let summary = recent_session_summary_payload(&entry, &execution_context);
+        assert_eq!(summary["executionRoute"], "node");
+        assert_eq!(summary["machine"]["id"], "node:missing");
+        assert_eq!(summary["machine"]["available"], false);
+        assert_eq!(summary["machine"]["health"], "unavailable");
     }
 
     #[tokio::test]

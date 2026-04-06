@@ -23,6 +23,12 @@ Third slice on the same branch:
 - stopped chat-side node machine payloads from reporting disconnected paired nodes as ready
 - added focused tests for connected vs disconnected paired-node availability
 
+Fourth slice on the same branch:
+
+- switched `chat.context()` recent workspace session summaries to reuse the normalized execution-context helper
+- included normalized machine payloads in recent-session summaries so disconnected node bindings stay visibly unavailable there too
+- added focused coverage for normalized recent-session machine state
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -35,3 +41,4 @@ Third slice on the same branch:
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_source_and_route`
 - `cargo test -p moltis-chat resolve_execution_context_marks_disconnected_node_unavailable`
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
+- `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
