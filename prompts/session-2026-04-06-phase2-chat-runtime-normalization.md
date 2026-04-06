@@ -35,6 +35,12 @@ Fifth slice on the same branch:
 - added operator-facing badges for recent session route, source, and machine health/trust
 - documented that recent workspace session cards now reflect normalized machine availability
 
+Sixth slice on the same branch:
+
+- normalized `chat.context().sandbox` so its `enabled` flag follows the resolved execution route instead of a separate router-only check
+- exposed `sandbox.available` from the normalized machine payload for fallback sandbox sessions
+- added focused coverage for the no-router sandbox fallback path
+
 ## Validation
 
 - `cargo +nightly-2025-11-30 fmt --all -- --check`
@@ -48,6 +54,7 @@ Fifth slice on the same branch:
 - `cargo test -p moltis-chat resolve_execution_context_marks_disconnected_node_unavailable`
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
+- `cargo test -p moltis-chat sandbox_info_payload_uses_normalized_sandbox_route_without_router`
 - `git diff --check`
 
 Validation blocked in this environment for the UI/docs slice:

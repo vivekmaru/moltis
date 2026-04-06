@@ -1316,6 +1316,56 @@ fn execution_root_for_route(route: ExecutionRoute, host_is_root: Option<bool>) -
     }
 }
 
+async fn sandbox_info_payload(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    session_entry: Option<&SessionEntry>,
+    execution_context: &ResolvedExecutionContext,
+) -> Value {
+    let sandbox_enabled = execution_context.route == ExecutionRoute::Sandbox;
+    let sandbox_available = execution_context
+        .machine
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if let Some(router) = state.sandbox_router() {
+        let config = router.config();
+        let session_image = session_entry.and_then(|entry| entry.sandbox_image.clone());
+        let effective_image = match session_image {
+            Some(img) if !img.is_empty() => img,
+            _ => router.default_image().await,
+        };
+        let container_name = {
+            let id = router.sandbox_id_for(session_key);
+            format!(
+                "{}-{}",
+                config
+                    .container_prefix
+                    .as_deref()
+                    .unwrap_or("moltis-sandbox"),
+                id.key
+            )
+        };
+        serde_json::json!({
+            "enabled": sandbox_enabled,
+            "available": sandbox_available,
+            "backend": router.backend_name(),
+            "mode": config.mode,
+            "scope": config.scope,
+            "workspaceMount": config.workspace_mount,
+            "image": effective_image,
+            "containerName": container_name,
+        })
+    } else {
+        serde_json::json!({
+            "enabled": sandbox_enabled,
+            "available": sandbox_available,
+            "backend": null,
+        })
+    }
+}
+
 async fn load_coordination_state(
     state_store: Option<&Arc<SessionStateStore>>,
     session_key: &str,
@@ -4905,41 +4955,13 @@ impl ChatService for LiveChatService {
             }
         };
 
-        // Sandbox info
-        let sandbox_info = if let Some(router) = self.state.sandbox_router() {
-            let is_sandboxed = router.is_sandboxed(&session_key).await;
-            let config = router.config();
-            let session_image = session_entry.as_ref().and_then(|e| e.sandbox_image.clone());
-            let effective_image = match session_image {
-                Some(img) if !img.is_empty() => img,
-                _ => router.default_image().await,
-            };
-            let container_name = {
-                let id = router.sandbox_id_for(&session_key);
-                format!(
-                    "{}-{}",
-                    config
-                        .container_prefix
-                        .as_deref()
-                        .unwrap_or("moltis-sandbox"),
-                    id.key
-                )
-            };
-            serde_json::json!({
-                "enabled": is_sandboxed,
-                "backend": router.backend_name(),
-                "mode": config.mode,
-                "scope": config.scope,
-                "workspaceMount": config.workspace_mount,
-                "image": effective_image,
-                "containerName": container_name,
-            })
-        } else {
-            serde_json::json!({
-                "enabled": false,
-                "backend": null,
-            })
-        };
+        let sandbox_info = sandbox_info_payload(
+            &self.state,
+            &session_key,
+            session_entry.as_ref(),
+            &execution_context,
+        )
+        .await;
         let host_is_root = detect_host_root_user().await;
         let exec_mode = execution_mode_for_route(execution_context.route);
         let exec_is_root = execution_root_for_route(execution_context.route, host_is_root);
@@ -9848,6 +9870,27 @@ mod tests {
         assert_eq!(resolved.machine["id"], "node:ready");
         assert_eq!(resolved.machine["available"], true);
         assert_eq!(resolved.machine["health"], "ready");
+    }
+
+    #[tokio::test]
+    async fn sandbox_info_payload_uses_normalized_sandbox_route_without_router() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.sandbox_enabled = Some(true);
+
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            None,
+        )
+        .await;
+        let sandbox_info =
+            sandbox_info_payload(&runtime, &entry.key, Some(&entry), &execution_context).await;
+
+        assert_eq!(sandbox_info["enabled"], true);
+        assert_eq!(sandbox_info["available"], false);
+        assert_eq!(sandbox_info["backend"], Value::Null);
     }
 
     #[test]
