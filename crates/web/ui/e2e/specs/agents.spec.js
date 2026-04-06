@@ -200,6 +200,123 @@ test.describe("Agents settings page", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("session header machine selector switches execution machine", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const state = await import(`${prefix}js/state.js`);
+
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					nodeId: null,
+				},
+				{
+					id: "sandbox",
+					kind: "sandbox",
+					label: "Sandbox",
+					executionRoute: "sandbox",
+					route: "sandbox",
+					trustState: "sandboxed",
+					health: "ready",
+					available: true,
+					nodeId: null,
+				},
+			];
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function resolveRpc(parsed, responsePayload) {
+				const responder = state.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete state.pending[parsed.id];
+				}
+				return undefined;
+			}
+
+			function resolveMachineRpc(parsed) {
+				if (parsed.method === "machines.list") {
+					return resolveRpc(parsed, machinesPayload);
+				}
+				if (parsed.method !== "machines.set_session") {
+					return null;
+				}
+				const targetMachine =
+					machinesPayload.find((machine) => machine.id === parsed.params.machineId) || machinesPayload[0];
+				return resolveRpc(parsed, {
+					machine: targetMachine,
+					executionRoute: targetMachine.executionRoute,
+					node_id: targetMachine.nodeId,
+					sandbox_enabled: targetMachine.id === "sandbox",
+				});
+			}
+
+			if (!window.__sessionHeaderMachineOrigSend) {
+				window.__sessionHeaderMachineOrigSend = state.ws.send.bind(state.ws);
+			}
+
+			state.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__sessionHeaderMachineOrigSend(payload);
+				return resolveMachineRpc(parsed) ?? window.__sessionHeaderMachineOrigSend(payload);
+			};
+		});
+
+		await createSession(page);
+
+		const machineCombo = page.locator("#sessionHeaderToolbarMount .model-combo").first();
+		await expect(machineCombo).toBeVisible({ timeout: 10_000 });
+		const machineComboBtn = machineCombo.locator(".model-combo-btn");
+		await expect(machineComboBtn).toBeEnabled({ timeout: 10_000 });
+		await machineComboBtn.click();
+		const machineDropdown = machineCombo.locator(".model-dropdown");
+		await expect(machineDropdown).toBeVisible({ timeout: 10_000 });
+		const sandboxOption = machineDropdown.locator(".model-dropdown-item", { hasText: "Sandbox" }).first();
+		await expect(sandboxOption).toBeVisible({ timeout: 10_000 });
+		await sandboxOption.click();
+
+		await expect
+			.poll(() => {
+				return page.evaluate(() => {
+					const session = window.__moltis_stores?.sessionStore?.activeSession?.value;
+					return {
+						machineId: session?.machine?.id || null,
+						executionRoute: session?.executionRoute || null,
+						sandboxEnabled: session?.sandbox_enabled === true,
+					};
+				});
+			})
+			.toEqual({
+				machineId: "sandbox",
+				executionRoute: "sandbox",
+				sandboxEnabled: true,
+			});
+
+		await expect(page.locator("#sessionHeaderToolbarMount")).toContainText("Sandbox");
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("create form validates required fields", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/agents");
