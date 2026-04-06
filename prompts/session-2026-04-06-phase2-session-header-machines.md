@@ -13,7 +13,21 @@ This slice removes the remaining node-centric session-header routing path in `cr
 
 It also adds a focused E2E regression in `crates/web/ui/e2e/specs/agents.spec.js` that mocks the machine RPCs and verifies the session header machine selector updates the active session route and machine state.
 
+Follow-up slice on the same branch:
+
+- switched the tools overview in `crates/web/src/assets/js/page-settings.js` from `node.list` to `machines.list`
+- changed the execution-route summary to count remote routes from machine kinds (`node` / `ssh`) instead of the old node inventory
+- extended `crates/web/ui/e2e/specs/settings-nav.spec.js` to verify the tools page shows machine-based route counts
+
+Cleanup slice on the same branch:
+
+- removed the unused legacy `crates/web/src/assets/js/nodes-selector.js` module
+- removed the unused legacy `crates/web/src/assets/js/stores/node-store.js` store
+- kept the active toolbar/header machine flows on the normalized `machine-selector` / `machine-store` path only
+
 ## Validation
 
 - `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/components/session-header.js crates/web/ui/e2e/specs/agents.spec.js`
 - `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/agents.spec.js --grep "session header machine selector switches execution machine"`
+- `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/page-settings.js crates/web/ui/e2e/specs/settings-nav.spec.js`
+- `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/settings-nav.spec.js --grep "tools settings shows effective inventory and routing summary"`
