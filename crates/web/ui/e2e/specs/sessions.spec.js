@@ -101,6 +101,113 @@ test.describe("Session management", () => {
 		await expect(items).not.toHaveCount(0);
 	});
 
+	test("bootstrap hydration prefers normalized machine payload over legacy fields", async ({ page }) => {
+		const seededSession = {
+			id: "sess-bootstrap",
+			key: "bootstrap:ssh",
+			label: "Bootstrap SSH",
+			model: "",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+			messageCount: 0,
+			lastSeenMessageCount: 0,
+			projectId: "workspace-bootstrap",
+			workspace: "workspace-bootstrap",
+			sandbox_enabled: true,
+			sandbox_image: null,
+			worktree_branch: "",
+			channelBinding: null,
+			activeChannel: false,
+			parentSessionKey: null,
+			forkPoint: null,
+			mcpDisabled: false,
+			preview: "",
+			archived: false,
+			agent_id: "main",
+			agentId: "main",
+			node_id: "node:legacy",
+			surface: "web",
+			sessionKind: "web",
+			executionRoute: "ssh",
+			machine: {
+				id: "ssh:deploy-box",
+				kind: "ssh",
+				route: "ssh",
+				executionRoute: "ssh",
+				label: "Deploy box",
+				available: true,
+			},
+			externalAgentSource: "codex",
+			version: 7,
+		};
+
+		await page.addInitScript((seedSession) => {
+			Object.defineProperty(window, "__MOLTIS__", {
+				configurable: true,
+				set(value) {
+					var next = value || {};
+					next.sessions_recent = [seedSession];
+					Object.defineProperty(window, "__MOLTIS__", {
+						value: next,
+						writable: true,
+						configurable: true,
+					});
+				},
+				get() {
+					return undefined;
+				},
+			});
+		}, seededSession);
+
+		await page.route("**/api/bootstrap?include_sessions=false", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					channels: null,
+					models: [],
+					projects: [],
+					sandbox: null,
+					counts: null,
+				}),
+			});
+		});
+		await page.route("**/api/sessions*", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify([seededSession]),
+			});
+		});
+
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await expect
+			.poll(() =>
+				page.evaluate(() => {
+					const session = window.__moltis_stores?.sessionStore?.getByKey?.("bootstrap:ssh");
+					if (!session) return null;
+					return {
+						executionRoute: session.executionRoute,
+						node_id: session.node_id,
+						sandbox_enabled: session.sandbox_enabled,
+						machineId: session.machine?.id || null,
+						externalAgentSource: session.externalAgentSource,
+					};
+				}),
+			)
+			.toEqual({
+				executionRoute: "ssh",
+				node_id: "ssh:deploy-box",
+				sandbox_enabled: false,
+				machineId: "ssh:deploy-box",
+				externalAgentSource: "codex",
+			});
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("sessions sidebar uses search and add button row", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);

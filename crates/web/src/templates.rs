@@ -176,6 +176,72 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
     out
 }
 
+fn bootstrap_execution_route(entry: &moltis_sessions::metadata::SessionEntry) -> &'static str {
+    if let Some(node_id) = entry.node_id.as_deref() {
+        if node_id.starts_with("ssh:") {
+            "ssh"
+        } else {
+            "node"
+        }
+    } else if entry.sandbox_enabled == Some(true) {
+        "sandbox"
+    } else {
+        "local"
+    }
+}
+
+fn bootstrap_machine_payload(
+    entry: &moltis_sessions::metadata::SessionEntry,
+    execution_route: &str,
+) -> serde_json::Value {
+    match execution_route {
+        "sandbox" => serde_json::json!({
+            "id": "sandbox",
+            "kind": "sandbox",
+            "route": "sandbox",
+            "executionRoute": "sandbox",
+            "label": "Sandbox",
+            "trustState": "sandboxed",
+            "health": "ready",
+            "available": true,
+            "nodeId": serde_json::Value::Null,
+        }),
+        "ssh" => serde_json::json!({
+            "id": entry.node_id.as_deref().unwrap_or("ssh:unresolved"),
+            "kind": "ssh",
+            "route": "ssh",
+            "executionRoute": "ssh",
+            "label": entry.node_id.as_deref().unwrap_or("SSH target"),
+            "trustState": "managed_ssh",
+            "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+            "available": entry.node_id.is_some(),
+            "nodeId": entry.node_id.clone(),
+        }),
+        "node" => serde_json::json!({
+            "id": entry.node_id.as_deref().unwrap_or("node:unresolved"),
+            "kind": "node",
+            "route": "node",
+            "executionRoute": "node",
+            "label": entry.node_id.as_deref().unwrap_or("Paired node"),
+            "trustState": "paired_node",
+            "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
+            "available": entry.node_id.is_some(),
+            "nodeId": entry.node_id.clone(),
+        }),
+        _ => serde_json::json!({
+            "id": "local",
+            "kind": "local",
+            "route": "local",
+            "executionRoute": "local",
+            "label": "Local host",
+            "trustState": "trusted_local",
+            "health": "ready",
+            "available": true,
+            "nodeId": serde_json::Value::Null,
+        }),
+    }
+}
+
 async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<serde_json::Value> {
     let Some(ref metadata) = gw.services.session_metadata else {
         return Vec::new();
@@ -209,6 +275,13 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
             .map(|text| truncate_preview(text, SESSION_PREVIEW_MAX_CHARS));
         let agent_id = entry.agent_id.clone().unwrap_or_else(|| "main".to_owned());
         let agent_id_camel = agent_id.clone();
+        let project_id = entry.project_id.clone();
+        let execution_route = bootstrap_execution_route(&entry);
+        let machine = bootstrap_machine_payload(&entry, execution_route);
+        let external_agent_source = entry
+            .external_agent_source
+            .map(moltis_sessions::metadata::ExternalAgentSource::as_str)
+            .unwrap_or("native");
 
         recent.push(serde_json::json!({
             "id": entry.id,
@@ -219,7 +292,8 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
             "updatedAt": entry.updated_at,
             "messageCount": entry.message_count,
             "lastSeenMessageCount": entry.last_seen_message_count,
-            "projectId": entry.project_id,
+            "projectId": project_id.clone(),
+            "workspace": project_id,
             "sandbox_enabled": entry.sandbox_enabled,
             "sandbox_image": entry.sandbox_image,
             "worktree_branch": entry.worktree_branch,
@@ -233,6 +307,9 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
             "agent_id": agent_id,
             "agentId": agent_id_camel,
             "node_id": entry.node_id,
+            "executionRoute": execution_route,
+            "machine": machine,
+            "externalAgentSource": external_agent_source,
             "version": entry.version,
         }));
     }
@@ -764,7 +841,37 @@ pub(crate) async fn onboarding_completed(gw: &GatewayState) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        moltis_sessions::metadata::{ExternalAgentSource, SessionEntry},
+    };
+
+    fn session_entry() -> SessionEntry {
+        SessionEntry {
+            id: "sess-1".to_string(),
+            key: "main".to_string(),
+            label: Some("Main".to_string()),
+            model: None,
+            created_at: 1,
+            updated_at: 2,
+            message_count: 3,
+            last_seen_message_count: 1,
+            project_id: None,
+            archived: false,
+            worktree_branch: None,
+            sandbox_enabled: None,
+            sandbox_image: None,
+            channel_binding: None,
+            parent_session_key: None,
+            fork_point: None,
+            mcp_disabled: None,
+            preview: None,
+            agent_id: None,
+            node_id: None,
+            external_agent_source: None,
+            version: 1,
+        }
+    }
 
     #[test]
     fn parse_git_branch_filters_defaults() {
@@ -840,5 +947,67 @@ mod tests {
         assert!(!should_redirect_from_onboarding(true, true));
         assert!(!should_redirect_from_onboarding(false, false));
         assert!(!should_redirect_from_onboarding(false, true));
+    }
+
+    #[test]
+    fn bootstrap_execution_route_prefers_machine_style_session_binding() {
+        let mut local = session_entry();
+        assert_eq!(bootstrap_execution_route(&local), "local");
+
+        local.sandbox_enabled = Some(true);
+        assert_eq!(bootstrap_execution_route(&local), "sandbox");
+
+        local.sandbox_enabled = Some(false);
+        local.node_id = Some("node-build".to_string());
+        assert_eq!(bootstrap_execution_route(&local), "node");
+
+        local.node_id = Some("ssh:deploy-box".to_string());
+        assert_eq!(bootstrap_execution_route(&local), "ssh");
+    }
+
+    #[test]
+    fn bootstrap_machine_payload_matches_execution_route_shape() {
+        let mut entry = session_entry();
+        entry.node_id = Some("ssh:deploy-box".to_string());
+        let ssh_machine = bootstrap_machine_payload(&entry, "ssh");
+        assert_eq!(ssh_machine["id"], "ssh:deploy-box");
+        assert_eq!(ssh_machine["executionRoute"], "ssh");
+        assert_eq!(ssh_machine["kind"], "ssh");
+        assert_eq!(ssh_machine["available"], true);
+
+        entry.node_id = Some("node-build".to_string());
+        let node_machine = bootstrap_machine_payload(&entry, "node");
+        assert_eq!(node_machine["id"], "node-build");
+        assert_eq!(node_machine["kind"], "node");
+        assert_eq!(node_machine["trustState"], "paired_node");
+
+        let local_machine = bootstrap_machine_payload(&session_entry(), "local");
+        assert_eq!(local_machine["id"], "local");
+        assert_eq!(local_machine["kind"], "local");
+        assert_eq!(local_machine["executionRoute"], "local");
+    }
+
+    #[test]
+    fn bootstrap_snapshot_fields_use_machine_model_defaults() {
+        let mut entry = session_entry();
+        entry.project_id = Some("workspace-1".to_string());
+        entry.external_agent_source = Some(ExternalAgentSource::Codex);
+        let execution_route = bootstrap_execution_route(&entry);
+        let machine = bootstrap_machine_payload(&entry, execution_route);
+
+        let payload = serde_json::json!({
+            "workspace": entry.project_id,
+            "executionRoute": execution_route,
+            "machine": machine,
+            "externalAgentSource": entry
+                .external_agent_source
+                .map(ExternalAgentSource::as_str)
+                .unwrap_or("native"),
+        });
+
+        assert_eq!(payload["workspace"], "workspace-1");
+        assert_eq!(payload["executionRoute"], "local");
+        assert_eq!(payload["machine"]["id"], "local");
+        assert_eq!(payload["externalAgentSource"], "codex");
     }
 }

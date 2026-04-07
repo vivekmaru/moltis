@@ -4,6 +4,7 @@
 // Session class instance with per-session signals for client-side state.
 
 import { computed, signal } from "@preact/signals";
+import { applySessionMachinePayload } from "../session-machine.js";
 
 // ── Session class ────────────────────────────────────────────
 
@@ -11,7 +12,7 @@ function assignSessionIdentityFields(target, serverData) {
 	target.label = serverData.label || "";
 	target.model = serverData.model || "";
 	target.provider = serverData.provider || "";
-	target.projectId = serverData.projectId || "";
+	target.projectId = serverData.projectId || serverData.workspace || "";
 	target.workspace = serverData.workspace || target.projectId || "";
 	target.workspaceLabel = serverData.workspaceLabel || "";
 	target.createdAt = serverData.createdAt || 0;
@@ -41,16 +42,13 @@ function assignSessionCountFields(target, serverData, preserveCounts) {
 }
 
 function assignSessionRouteFields(target, serverData) {
-	target.sandbox_enabled = serverData.sandbox_enabled;
 	target.sandbox_image = serverData.sandbox_image || null;
 	target.channelBinding = serverData.channelBinding || null;
 	target.agent_id = serverData.agent_id || "main";
-	target.node_id = serverData.node_id || null;
 	target.surface = serverData.surface || "web";
 	target.sessionKind = serverData.sessionKind || "web";
-	target.executionRoute = serverData.executionRoute || "local";
-	target.machine = serverData.machine || null;
 	target.externalAgentSource = serverData.externalAgentSource || "native";
+	applySessionMachinePayload(target, serverData, serverData.machine || target.machine || null);
 }
 
 function assignSessionStatusFields(target, serverData) {
