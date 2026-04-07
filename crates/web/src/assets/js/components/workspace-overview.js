@@ -398,7 +398,7 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		}
 		resetForm();
 		setShowAttachForm(false);
-		onAttached?.(result.payload);
+		onAttached?.(sessionKey, result.payload);
 	}
 
 	return html`
@@ -669,17 +669,19 @@ export function WorkspaceOverview() {
 	var { currentMachine, preferredMachine, preferredMachineId } = resolveMachineDetails(overview, session, machines);
 	var externalActivitySummary = overview?.externalActivitySummary?.sources || {};
 
-	function handleExternalAttached(payload) {
-		if (payload?.workspaceOverview) {
-			setOverview(cloneWorkspaceOverview(payload.workspaceOverview));
-		} else {
-			setRefreshToken((value) => value + 1);
-		}
-		if (payload?.activity?.source && session) {
-			session.externalAgentSource = payload.activity.source;
-			session.dataVersion.value++;
+	function handleExternalAttached(attachedSessionKey, payload) {
+		var targetSession = sessionStore.getByKey(attachedSessionKey);
+		if (payload?.activity?.source && targetSession) {
+			targetSession.externalAgentSource = payload.activity.source;
+			targetSession.dataVersion.value++;
 			sessionStore.notify();
 		}
+		if (sessionStore.activeSessionKey.value !== attachedSessionKey) return;
+		if (payload?.workspaceOverview) {
+			setOverview(cloneWorkspaceOverview(payload.workspaceOverview));
+			return;
+		}
+		setRefreshToken((value) => value + 1);
 	}
 
 	return html`

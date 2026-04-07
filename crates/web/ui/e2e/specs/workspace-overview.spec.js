@@ -458,4 +458,304 @@ test.describe("Workspace overview", () => {
 		await expect(chatMoreModal.getByRole("link", { name: "Open" })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
+
+	test("ignores stale attach responses after switching sessions", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/chats/main");
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const [sessionModule, state] = await Promise.all([
+				import(`${prefix}js/stores/session-store.js`),
+				import(`${prefix}js/state.js`),
+			]);
+
+			const sessionA = sessionModule.activeSessionKey.value;
+			const sessionB = "workspace-switch-b";
+			const overviewByKey = {
+				[sessionA]: {
+					workspaceId: "workspace-a",
+					workspaceLabel: "Workspace A",
+					currentBranch: null,
+					currentExecutionRoute: "local",
+					approvalMode: "smart",
+					coordination: {
+						decision: null,
+						currentPlan: null,
+						nextAction: null,
+						routeConstraints: null,
+						durableNotes: null,
+					},
+					memorySummary: null,
+					externalActivities: [],
+					externalActivitySummary: { count: 0, sources: {} },
+					recentSessions: [],
+					machine: {
+						id: "local",
+						kind: "local",
+						label: "Local host",
+						executionRoute: "local",
+						route: "local",
+						trustState: "trusted_local",
+						health: "ready",
+						available: true,
+						nodeId: null,
+					},
+					linkedProject: {
+						id: "workspace-a",
+						label: "Workspace A",
+						directory: "/tmp/workspace-a",
+						preferredMachineId: "local",
+						preferredMachine: {
+							id: "local",
+							kind: "local",
+							label: "Local host",
+							executionRoute: "local",
+							route: "local",
+							trustState: "trusted_local",
+							health: "ready",
+							available: true,
+							nodeId: null,
+						},
+					},
+				},
+				[sessionB]: {
+					workspaceId: "workspace-b",
+					workspaceLabel: "Workspace B",
+					currentBranch: null,
+					currentExecutionRoute: "local",
+					approvalMode: "smart",
+					coordination: {
+						decision: null,
+						currentPlan: "Keep working in session B",
+						nextAction: null,
+						routeConstraints: null,
+						durableNotes: null,
+					},
+					memorySummary: null,
+					externalActivities: [],
+					externalActivitySummary: { count: 0, sources: {} },
+					recentSessions: [],
+					machine: {
+						id: "local",
+						kind: "local",
+						label: "Local host",
+						executionRoute: "local",
+						route: "local",
+						trustState: "trusted_local",
+						health: "ready",
+						available: true,
+						nodeId: null,
+					},
+					linkedProject: {
+						id: "workspace-b",
+						label: "Workspace B",
+						directory: "/tmp/workspace-b",
+						preferredMachineId: "local",
+						preferredMachine: {
+							id: "local",
+							kind: "local",
+							label: "Local host",
+							executionRoute: "local",
+							route: "local",
+							trustState: "trusted_local",
+							health: "ready",
+							available: true,
+							nodeId: null,
+						},
+					},
+				},
+			};
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					platform: "local",
+					nodeId: null,
+					remoteIp: null,
+					hostPinned: null,
+					telemetryStale: null,
+					capabilities: ["system.run"],
+					commands: ["system.run"],
+				},
+			];
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function resolveRpcPayload(parsed) {
+				if (parsed.method === "machines.list") {
+					return machinesPayload;
+				}
+				if (parsed.method === "sessions.workspace_overview") {
+					return overviewByKey[parsed.params.key];
+				}
+				return undefined;
+			}
+
+			function respondToPending(parsed) {
+				const responder = state.pending[parsed.id];
+				if (!responder) return undefined;
+				const responsePayload = resolveRpcPayload(parsed);
+				if (responsePayload === undefined) {
+					return undefined;
+				}
+				responder({ ok: true, payload: responsePayload });
+				delete state.pending[parsed.id];
+				return true;
+			}
+
+			function handleDelayedAttach(parsed) {
+				const responder = state.pending[parsed.id];
+				if (!responder || parsed.method !== "sessions.external.attach" || parsed.params.key !== sessionA) {
+					return false;
+				}
+				window.__workspaceStaleAttachResolved = false;
+				setTimeout(() => {
+					overviewByKey[sessionA] = {
+						...overviewByKey[sessionA],
+						externalActivities: [
+							{
+								source: parsed.params.source,
+								title: parsed.params.title,
+								summary: parsed.params.summary,
+								link: parsed.params.link,
+								attachedAt: Date.now(),
+							},
+						],
+						externalActivitySummary: {
+							count: 1,
+							sources: { [parsed.params.source]: 1 },
+						},
+					};
+					responder({
+						ok: true,
+						payload: {
+							activity: overviewByKey[sessionA].externalActivities[0],
+							coordination: overviewByKey[sessionA].coordination,
+							workspaceOverview: overviewByKey[sessionA],
+						},
+					});
+					window.__workspaceStaleAttachResolved = true;
+					delete state.pending[parsed.id];
+				}, 200);
+				return true;
+			}
+
+			if (!window.__workspaceStaleAttachOrigSend) {
+				window.__workspaceStaleAttachOrigSend = state.ws.send.bind(state.ws);
+			}
+
+			state.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__workspaceStaleAttachOrigSend(payload);
+				if (respondToPending(parsed)) return undefined;
+				if (handleDelayedAttach(parsed)) return undefined;
+
+				return window.__workspaceStaleAttachOrigSend(payload);
+			};
+
+			sessionModule.upsert({
+				key: sessionA,
+				label: "Workspace A session",
+				model: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				messageCount: 0,
+				lastSeenMessageCount: 0,
+				projectId: "workspace-a",
+				workspace: "workspace-a",
+				workspaceLabel: "Workspace A",
+				sandbox_enabled: false,
+				sandbox_image: null,
+				worktree_branch: "",
+				channelBinding: null,
+				activeChannel: false,
+				parentSessionKey: null,
+				forkPoint: null,
+				mcpDisabled: false,
+				preview: "",
+				archived: false,
+				agent_id: "main",
+				agentId: "main",
+				node_id: null,
+				surface: "web",
+				sessionKind: "web",
+				executionRoute: "local",
+				machine: overviewByKey[sessionA].machine,
+				externalAgentSource: "native",
+				version: 999,
+			});
+			sessionModule.upsert({
+				key: sessionB,
+				label: "Workspace B session",
+				model: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				messageCount: 0,
+				lastSeenMessageCount: 0,
+				projectId: "workspace-b",
+				workspace: "workspace-b",
+				workspaceLabel: "Workspace B",
+				sandbox_enabled: false,
+				sandbox_image: null,
+				worktree_branch: "",
+				channelBinding: null,
+				activeChannel: false,
+				parentSessionKey: null,
+				forkPoint: null,
+				mcpDisabled: false,
+				preview: "",
+				archived: false,
+				agent_id: "main",
+				agentId: "main",
+				node_id: null,
+				surface: "web",
+				sessionKind: "web",
+				executionRoute: "local",
+				machine: overviewByKey[sessionB].machine,
+				externalAgentSource: "native",
+				version: 999,
+			});
+			sessionModule.setActive(sessionA);
+			sessionModule.notify();
+		});
+
+		await openChatMoreModal(page);
+		const chatMoreModal = page.locator("#chatMoreModal");
+		await chatMoreModal.getByRole("button", { name: "Attach external work" }).click();
+		await chatMoreModal.getByLabel("Summary").fill("Late response from workspace A");
+		await chatMoreModal.getByRole("button", { name: "Attach", exact: true }).click();
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const sessionModule = await import(`${prefix}js/stores/session-store.js`);
+			sessionModule.setActive("workspace-switch-b");
+			sessionModule.notify();
+		});
+
+		await expect(chatMoreModal.getByText("Workspace: Workspace B", { exact: true })).toBeVisible();
+		await page.waitForFunction(() => window.__workspaceStaleAttachResolved === true);
+		await expect(chatMoreModal.getByText("Workspace: Workspace B", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Late response from workspace A", { exact: true })).not.toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
 });
