@@ -27,6 +27,18 @@ Started the `feat/phase2-context-followup` branch with a prompt-view normalizati
   - MCP server list
 - Normalized `mcpServers` to always be an array for the frontend, even when the MCP service
   returns `{ "servers": [...] }`.
+- Added a shared `prepare_context_view()` helper for `chat.context`.
+- `chat.context` now builds its top-level response from one prepared view instead of mixing:
+  - project lookup
+  - connected-node execution resolution
+  - workspace recent-session loading
+  - coordination state loading
+  - session payload assembly
+  - token usage and sandbox/execution info
+  inline in the RPC handler.
+- Extracted `resolve_context_project_info()` and `recent_workspace_sessions()` to keep the
+  `chat.context` orchestration consistent with the already-normalized session and workspace
+  payload helpers.
 
 ### Tests
 
@@ -36,6 +48,8 @@ Started the `feat/phase2-context-followup` branch with a prompt-view normalizati
 - Added context-capability coverage:
   - `normalize_mcp_servers_payload_accepts_wrapped_or_array_shapes`
   - `context_returns_normalized_mcp_servers_array`
+- Added context-view coverage:
+  - `context_reuses_prepared_current_session_payload`
 
 ## Validation
 
@@ -44,4 +58,5 @@ Started the `feat/phase2-context-followup` branch with a prompt-view normalizati
 - `cargo test -p moltis-chat raw_prompt_matches_full_context_system_prompt`
 - `cargo test -p moltis-chat normalize_mcp_servers_payload_accepts_wrapped_or_array_shapes`
 - `cargo test -p moltis-chat context_returns_normalized_mcp_servers_array`
+- `cargo test -p moltis-chat context_reuses_prepared_current_session_payload`
 - `cargo check -p moltis-chat`
