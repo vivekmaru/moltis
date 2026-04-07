@@ -2306,6 +2306,10 @@ impl SessionService for LiveSessionService {
         // Inherit model, project, mcp_disabled, and agent_id from parent.
         if let Some(parent) = self.metadata.get(parent_key).await {
             let parent_agent = self.resolve_agent_id_for_entry(&parent, false).await;
+            let parent_route = self.effective_execution_route(&parent).await;
+            let parent_machine = self
+                .machine_descriptor_with_inventory(parent_route, &parent, None)
+                .await;
             if parent.model.is_some() {
                 self.metadata.set_model(&new_key, parent.model).await;
             }
@@ -2323,12 +2327,8 @@ impl SessionService for LiveSessionService {
                 .metadata
                 .set_agent_id(&new_key, Some(&parent_agent))
                 .await;
-            if parent.node_id.is_some() {
-                let _ = self
-                    .metadata
-                    .set_node_id(&new_key, parent.node_id.as_deref())
-                    .await;
-            }
+            self.apply_machine_binding(&new_key, Some(&parent_machine.id))
+                .await;
             if parent.external_agent_source.is_some() {
                 let _ = self
                     .metadata
@@ -3662,6 +3662,67 @@ mod tests {
         assert_eq!(entry.project_id.as_deref(), Some("ops"));
         assert_eq!(entry.node_id.as_deref(), Some("node-build"));
         assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_sandbox_machine_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        metadata.set_sandbox_enabled("main", Some(true)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, Some(true));
+        assert_eq!(entry.node_id, None);
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_remote_machine_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        let _ = metadata.set_node_id("main", Some("node-builder")).await;
+        metadata.set_sandbox_enabled("main", Some(false)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.node_id.as_deref(), Some("node-builder"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-builder");
     }
 
     #[tokio::test]
