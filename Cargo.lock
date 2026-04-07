@@ -7038,6 +7038,7 @@ dependencies = [
  "moltis-gateway",
  "moltis-httpd",
  "moltis-media",
+ "moltis-sessions",
  "moltis-skills",
  "moltis-tools",
  "portable-pty",

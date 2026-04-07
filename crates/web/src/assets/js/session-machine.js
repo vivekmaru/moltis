@@ -17,10 +17,10 @@ export function resolveSessionMachineId(entry, route = resolveSessionExecutionRo
 }
 
 export function resolveSessionNodeId(entry, route = resolveSessionExecutionRoute(entry)) {
-	if (entry?.node_id) return entry.node_id;
 	if ((route === "ssh" || route === "node") && entry?.machine?.id) {
 		return entry.machine.id;
 	}
+	if (entry?.node_id) return entry.node_id;
 	return null;
 }
 

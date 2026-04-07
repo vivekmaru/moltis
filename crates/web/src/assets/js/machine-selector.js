@@ -1,7 +1,7 @@
 import { onEvent } from "./events.js";
 import { sendRpc } from "./helpers.js";
 import { updateSandboxUI } from "./sandbox.js";
-import { applySessionMachinePayload } from "./session-machine.js";
+import { applySessionMachinePayload, resolveSessionExecutionRoute } from "./session-machine.js";
 import * as S from "./state.js";
 import { machineStore } from "./stores/machine-store.js";
 import { sessionStore } from "./stores/session-store.js";
@@ -68,7 +68,7 @@ export function selectMachine(machineId) {
 		machineStore.select(machine.id);
 		updateMachineComboLabel(machine);
 		syncActiveSessionMachine(machine, res.payload);
-		updateSandboxUI(res.payload?.sandbox_enabled === true);
+		updateSandboxUI(resolveSessionExecutionRoute(res.payload || machine) === "sandbox");
 	});
 	closeMachineDropdown();
 }
