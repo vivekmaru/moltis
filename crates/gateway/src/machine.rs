@@ -384,9 +384,7 @@ pub async fn effective_session_sandbox_active(
     entry: &SessionEntry,
 ) -> bool {
     if let Some(router) = router {
-        if router.is_sandboxed(session_key).await {
-            return true;
-        }
+        return router.is_sandboxed(session_key).await;
     }
     entry.sandbox_enabled == Some(true)
 }
@@ -569,7 +567,11 @@ pub fn live_session_machine_descriptor_for_inventory(
 
 #[cfg(test)]
 mod tests {
-    use {super::*, moltis_sessions::metadata::SessionEntry};
+    use {
+        super::*,
+        moltis_sessions::metadata::SessionEntry,
+        moltis_tools::sandbox::{DockerSandbox, Sandbox, SandboxConfig, SandboxMode},
+    };
 
     fn session_entry(key: &str) -> SessionEntry {
         SessionEntry {
@@ -618,6 +620,20 @@ mod tests {
 
         entry.sandbox_enabled = Some(false);
         assert!(!effective_session_sandbox_active(None, &entry.key, &entry).await);
+    }
+
+    #[tokio::test]
+    async fn effective_session_sandbox_active_prefers_router_state_over_entry_flag() {
+        let config = SandboxConfig {
+            mode: SandboxMode::Off,
+            ..Default::default()
+        };
+        let backend: Arc<dyn Sandbox> = Arc::new(DockerSandbox::new(config.clone()));
+        let router = Arc::new(SandboxRouter::with_backend(config, backend));
+        let mut entry = session_entry("sandboxed");
+        entry.sandbox_enabled = Some(true);
+
+        assert!(!effective_session_sandbox_active(Some(&router), &entry.key, &entry).await);
     }
 
     #[test]
