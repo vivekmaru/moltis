@@ -21,6 +21,20 @@ pub struct MachineInventorySnapshot {
 
 impl MachineInventorySnapshot {
     #[must_use]
+    pub fn from_machines(
+        sandbox_available: bool,
+        machines: impl IntoIterator<Item = MachineDescriptor>,
+    ) -> Self {
+        Self {
+            sandbox_available,
+            machines_by_id: machines
+                .into_iter()
+                .map(|machine| (machine.id.clone(), machine))
+                .collect(),
+        }
+    }
+
+    #[must_use]
     pub fn sandbox_available(&self) -> bool {
         self.sandbox_available
     }
@@ -316,7 +330,7 @@ pub fn sandbox_machine_available(state: &GatewayState) -> bool {
     sandbox_router_available(state.sandbox_router.as_ref())
 }
 
-pub async fn list_machines(state: &Arc<GatewayState>) -> Vec<MachineDescriptor> {
+pub async fn list_machines_from_state(state: &GatewayState) -> Vec<MachineDescriptor> {
     let mut machines = vec![MachineDescriptor::local()];
 
     if state.sandbox_router.is_some() {
@@ -358,9 +372,15 @@ pub async fn list_machines(state: &Arc<GatewayState>) -> Vec<MachineDescriptor> 
     machines
 }
 
-pub async fn machine_inventory_snapshot(state: &Arc<GatewayState>) -> MachineInventorySnapshot {
+pub async fn list_machines(state: &Arc<GatewayState>) -> Vec<MachineDescriptor> {
+    list_machines_from_state(state.as_ref()).await
+}
+
+pub async fn machine_inventory_snapshot_from_state(
+    state: &GatewayState,
+) -> MachineInventorySnapshot {
     let sandbox_available = sandbox_machine_available(state);
-    let machines_by_id = list_machines(state)
+    let machines_by_id = list_machines_from_state(state)
         .await
         .into_iter()
         .map(|machine| (machine.id.clone(), machine))
@@ -369,6 +389,10 @@ pub async fn machine_inventory_snapshot(state: &Arc<GatewayState>) -> MachineInv
         sandbox_available,
         machines_by_id,
     }
+}
+
+pub async fn machine_inventory_snapshot(state: &Arc<GatewayState>) -> MachineInventorySnapshot {
+    machine_inventory_snapshot_from_state(state.as_ref()).await
 }
 
 pub async fn resolve_machine(

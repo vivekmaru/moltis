@@ -176,70 +176,16 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn bootstrap_execution_route(entry: &moltis_sessions::metadata::SessionEntry) -> &'static str {
-    if let Some(node_id) = entry.node_id.as_deref() {
-        if node_id.starts_with("ssh:") {
-            "ssh"
-        } else {
-            "node"
-        }
-    } else if entry.sandbox_enabled == Some(true) {
-        "sandbox"
-    } else {
-        "local"
-    }
-}
-
-fn bootstrap_machine_payload(
+fn bootstrap_machine_descriptor(
     entry: &moltis_sessions::metadata::SessionEntry,
-    execution_route: &str,
-) -> serde_json::Value {
-    match execution_route {
-        "sandbox" => serde_json::json!({
-            "id": "sandbox",
-            "kind": "sandbox",
-            "route": "sandbox",
-            "executionRoute": "sandbox",
-            "label": "Sandbox",
-            "trustState": "sandboxed",
-            "health": "ready",
-            "available": true,
-            "nodeId": serde_json::Value::Null,
-        }),
-        "ssh" => serde_json::json!({
-            "id": entry.node_id.as_deref().unwrap_or("ssh:unresolved"),
-            "kind": "ssh",
-            "route": "ssh",
-            "executionRoute": "ssh",
-            "label": entry.node_id.as_deref().unwrap_or("SSH target"),
-            "trustState": "managed_ssh",
-            "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
-            "available": entry.node_id.is_some(),
-            "nodeId": entry.node_id.clone(),
-        }),
-        "node" => serde_json::json!({
-            "id": entry.node_id.as_deref().unwrap_or("node:unresolved"),
-            "kind": "node",
-            "route": "node",
-            "executionRoute": "node",
-            "label": entry.node_id.as_deref().unwrap_or("Paired node"),
-            "trustState": "paired_node",
-            "health": if entry.node_id.is_some() { "ready" } else { "unavailable" },
-            "available": entry.node_id.is_some(),
-            "nodeId": entry.node_id.clone(),
-        }),
-        _ => serde_json::json!({
-            "id": "local",
-            "kind": "local",
-            "route": "local",
-            "executionRoute": "local",
-            "label": "Local host",
-            "trustState": "trusted_local",
-            "health": "ready",
-            "available": true,
-            "nodeId": serde_json::Value::Null,
-        }),
-    }
+    inventory: &moltis_gateway::machine::MachineInventorySnapshot,
+) -> moltis_gateway::machine::MachineDescriptor {
+    let sandbox_active = entry.sandbox_enabled == Some(true);
+    moltis_gateway::machine::live_session_machine_descriptor_for_inventory(
+        inventory,
+        entry,
+        sandbox_active,
+    )
 }
 
 async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<serde_json::Value> {
@@ -247,6 +193,7 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
         return Vec::new();
     };
 
+    let inventory = moltis_gateway::machine::machine_inventory_snapshot_from_state(gw).await;
     let mut recent = Vec::new();
     for entry in metadata.list().await.into_iter().take(limit) {
         let active_channel = if let Some(ref binding_json) = entry.channel_binding {
@@ -276,8 +223,9 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
         let agent_id = entry.agent_id.clone().unwrap_or_else(|| "main".to_owned());
         let agent_id_camel = agent_id.clone();
         let project_id = entry.project_id.clone();
-        let execution_route = bootstrap_execution_route(&entry);
-        let machine = bootstrap_machine_payload(&entry, execution_route);
+        let machine = bootstrap_machine_descriptor(&entry, &inventory);
+        let execution_route = machine.execution_route;
+        let machine = serde_json::to_value(machine).unwrap_or(serde_json::Value::Null);
         let external_agent_source = entry
             .external_agent_source
             .map(moltis_sessions::metadata::ExternalAgentSource::as_str)
@@ -843,6 +791,9 @@ pub(crate) async fn onboarding_completed(gw: &GatewayState) -> bool {
 mod tests {
     use {
         super::*,
+        moltis_gateway::machine::{
+            MachineDescriptor, MachineHealth, MachineInventorySnapshot, MachineTrustState,
+        },
         moltis_sessions::metadata::{ExternalAgentSource, SessionEntry},
     };
 
@@ -949,42 +900,89 @@ mod tests {
         assert!(!should_redirect_from_onboarding(false, true));
     }
 
-    #[test]
-    fn bootstrap_execution_route_prefers_machine_style_session_binding() {
-        let mut local = session_entry();
-        assert_eq!(bootstrap_execution_route(&local), "local");
-
-        local.sandbox_enabled = Some(true);
-        assert_eq!(bootstrap_execution_route(&local), "sandbox");
-
-        local.sandbox_enabled = Some(false);
-        local.node_id = Some("node-build".to_string());
-        assert_eq!(bootstrap_execution_route(&local), "node");
-
-        local.node_id = Some("ssh:deploy-box".to_string());
-        assert_eq!(bootstrap_execution_route(&local), "ssh");
+    fn inventory_with_machines(
+        machines: impl IntoIterator<Item = MachineDescriptor>,
+        sandbox_available: bool,
+    ) -> MachineInventorySnapshot {
+        MachineInventorySnapshot::from_machines(sandbox_available, machines)
     }
 
     #[test]
-    fn bootstrap_machine_payload_matches_execution_route_shape() {
+    fn bootstrap_machine_descriptor_prefers_machine_inventory_state() {
+        let mut local = session_entry();
+        let inventory = inventory_with_machines([], false);
+        assert_eq!(
+            bootstrap_machine_descriptor(&local, &inventory).execution_route,
+            "local"
+        );
+
+        local.sandbox_enabled = Some(true);
+        assert_eq!(
+            bootstrap_machine_descriptor(&local, &inventory).execution_route,
+            "sandbox"
+        );
+
+        local.sandbox_enabled = Some(false);
+        local.node_id = Some("node-build".to_string());
+        assert_eq!(
+            bootstrap_machine_descriptor(&local, &inventory).execution_route,
+            "node"
+        );
+
+        local.node_id = Some("ssh:deploy-box".to_string());
+        assert_eq!(
+            bootstrap_machine_descriptor(&local, &inventory).execution_route,
+            "ssh"
+        );
+    }
+
+    #[test]
+    fn bootstrap_machine_descriptor_uses_live_inventory_health() {
         let mut entry = session_entry();
-        entry.node_id = Some("ssh:deploy-box".to_string());
-        let ssh_machine = bootstrap_machine_payload(&entry, "ssh");
-        assert_eq!(ssh_machine["id"], "ssh:deploy-box");
-        assert_eq!(ssh_machine["executionRoute"], "ssh");
-        assert_eq!(ssh_machine["kind"], "ssh");
-        assert_eq!(ssh_machine["available"], true);
-
         entry.node_id = Some("node-build".to_string());
-        let node_machine = bootstrap_machine_payload(&entry, "node");
-        assert_eq!(node_machine["id"], "node-build");
-        assert_eq!(node_machine["kind"], "node");
-        assert_eq!(node_machine["trustState"], "paired_node");
+        let inventory = inventory_with_machines(
+            [MachineDescriptor {
+                id: "node-build".to_string(),
+                label: "Build node".to_string(),
+                kind: moltis_gateway::machine::MachineKind::Node,
+                execution_route: "node",
+                trust_state: MachineTrustState::PairedNode,
+                health: MachineHealth::Degraded,
+                available: true,
+                platform: Some("linux".to_string()),
+                node_id: Some("node-build".to_string()),
+                remote_ip: Some("10.0.0.5".to_string()),
+                host_pinned: None,
+                telemetry_stale: Some(true),
+                capabilities: vec!["system.run".to_string()],
+                commands: vec!["system.run".to_string()],
+            }],
+            false,
+        );
 
-        let local_machine = bootstrap_machine_payload(&session_entry(), "local");
-        assert_eq!(local_machine["id"], "local");
-        assert_eq!(local_machine["kind"], "local");
-        assert_eq!(local_machine["executionRoute"], "local");
+        let node_machine = bootstrap_machine_descriptor(&entry, &inventory);
+        assert_eq!(node_machine.id, "node-build");
+        assert_eq!(node_machine.execution_route, "node");
+        assert_eq!(
+            node_machine.kind,
+            moltis_gateway::machine::MachineKind::Node
+        );
+        assert_eq!(node_machine.trust_state, MachineTrustState::PairedNode);
+        assert_eq!(node_machine.health, MachineHealth::Degraded);
+        assert!(node_machine.available);
+    }
+
+    #[test]
+    fn bootstrap_machine_descriptor_marks_missing_node_unavailable() {
+        let mut entry = session_entry();
+        entry.node_id = Some("node-missing".to_string());
+        let inventory = inventory_with_machines([], false);
+
+        let node_machine = bootstrap_machine_descriptor(&entry, &inventory);
+        assert_eq!(node_machine.id, "node-missing");
+        assert_eq!(node_machine.execution_route, "node");
+        assert_eq!(node_machine.health, MachineHealth::Unavailable);
+        assert!(!node_machine.available);
     }
 
     #[test]
@@ -992,8 +990,10 @@ mod tests {
         let mut entry = session_entry();
         entry.project_id = Some("workspace-1".to_string());
         entry.external_agent_source = Some(ExternalAgentSource::Codex);
-        let execution_route = bootstrap_execution_route(&entry);
-        let machine = bootstrap_machine_payload(&entry, execution_route);
+        let inventory = inventory_with_machines([], false);
+        let machine = bootstrap_machine_descriptor(&entry, &inventory);
+        let execution_route = machine.execution_route;
+        let machine = serde_json::to_value(machine).unwrap();
 
         let payload = serde_json::json!({
             "workspace": entry.project_id,
