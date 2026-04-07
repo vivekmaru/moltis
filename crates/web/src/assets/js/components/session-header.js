@@ -8,6 +8,8 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { onEvent } from "../events.js";
 import * as gon from "../gon.js";
 import { parseAgentsListPayload, sendRpc } from "../helpers.js";
+import { restoreMachineSelection } from "../machine-selector.js";
+import { updateSandboxUI } from "../sandbox.js";
 import {
 	clearActiveSession,
 	fetchSessions,
@@ -74,26 +76,38 @@ function buildAgentPickerState(agentOptions, agentSelectValue, defaultAgentId, s
 	};
 }
 
-function buildNodePickerState(nodeOptions, currentNodeId, switchingNode) {
-	var hasCurrentNodeOption = currentNodeId === "" || nodeOptions.some((node) => node.nodeId === currentNodeId);
+function machineOptionLabel(machine) {
+	if (!machine) return "Local host";
+	return machine.label || machine.id || "Local host";
+}
+
+function selectableNonLocalMachines(machineOptions) {
+	return (machineOptions || []).filter(
+		(machine) => machine?.id && machine.id !== "local" && machine.available !== false,
+	);
+}
+
+function buildMachinePickerState(machineOptions, currentMachineId, switchingMachine) {
+	var selectableMachines = selectableNonLocalMachines(machineOptions);
+	var hasCurrentMachineOption =
+		currentMachineId === "local" || selectableMachines.some((machine) => machine.id === currentMachineId);
 	var options = [
-		{ value: "", label: "Local" },
-		...nodeOptions.map((node) => ({
-			value: node.nodeId,
-			label: nodeOptionLabel(node),
+		{ value: "local", label: "Local host" },
+		...selectableMachines.map((machine) => ({
+			value: machine.id,
+			label: machineOptionLabel(machine),
 		})),
 	];
-	if (!hasCurrentNodeOption && currentNodeId) {
-		var fallbackLabel = currentNodeId.startsWith("ssh:") ? `SSH: ${currentNodeId.slice(4)}` : `node:${currentNodeId}`;
+	if (!hasCurrentMachineOption && currentMachineId) {
 		options = [
 			{
-				value: currentNodeId,
-				label: switchingNode ? "Switching…" : fallbackLabel,
+				value: currentMachineId,
+				label: switchingMachine ? "Switching…" : currentMachineId,
 			},
 			...options,
 		];
 	}
-	return { hasCurrentNodeOption, options };
+	return { hasCurrentMachineOption, options };
 }
 
 function renderSessionBadges(session, workspaceLabel, routeLabel, sourceLabel) {
@@ -219,7 +233,7 @@ function renderSessionSelectors({
 					options=${nodePicker.options}
 					value=${currentNodeId}
 					onChange=${onNodeChange}
-					placeholder="Session node"
+					placeholder="Session machine"
 					searchable=${false}
 					allowEmpty=${false}
 					fullWidth=${false}
@@ -392,20 +406,6 @@ function buildShareUrl(payload) {
 	return url;
 }
 
-function isSshTargetNode(node) {
-	return node?.platform === "ssh" || String(node?.nodeId || "").startsWith("ssh:");
-}
-
-function nodeOptionLabel(node) {
-	if (!node) return "Local";
-	if (node.displayName) return node.displayName;
-	if (isSshTargetNode(node)) {
-		var target = String(node.nodeId || "").replace(/^ssh:/, "");
-		return `SSH: ${target}`;
-	}
-	return node.nodeId;
-}
-
 async function copyShareUrl(url, visibility) {
 	try {
 		if (navigator.clipboard?.writeText) {
@@ -433,10 +433,10 @@ function loadAgentOptions(setDefaultAgentId, setAgentOptions, setAgentOptionsLoa
 	});
 }
 
-function refreshNodeOptions(setNodeOptions, isCancelled) {
-	sendRpc("node.list", {}).then((res) => {
+function refreshMachineOptions(setMachineOptions, isCancelled) {
+	sendRpc("machines.list", {}).then((res) => {
 		if (isCancelled() || !res?.ok) return;
-		setNodeOptions(Array.isArray(res.payload) ? res.payload : []);
+		setMachineOptions(Array.isArray(res.payload) ? res.payload : []);
 	});
 }
 
@@ -588,26 +588,44 @@ function switchSessionAgent(nextAgentId, currentAgentId, switchingAgent, setSwit
 		});
 }
 
-function switchSessionNode(nextNodeId, switchingNode, setSwitchingNode, currentKey, session) {
-	if (switchingNode) return;
-	setSwitchingNode(true);
-	sendRpc("nodes.set_session", {
+function switchSessionMachine(
+	nextMachineId,
+	currentMachineId,
+	switchingMachine,
+	setSwitchingMachine,
+	currentKey,
+	session,
+) {
+	if (switchingMachine) return;
+	var targetMachineId = nextMachineId || "local";
+	if (targetMachineId === currentMachineId) return;
+	setSwitchingMachine(true);
+	sendRpc("machines.set_session", {
 		session_key: currentKey,
-		node_id: nextNodeId || null,
+		machineId: targetMachineId,
 	})
 		.then((res) => {
 			if (!res?.ok) {
-				showToast(res?.error?.message || "Failed to switch node", "error");
+				showToast(res?.error?.message || "Failed to switch machine", "error");
 				return;
 			}
 			if (session) {
-				session.node_id = nextNodeId || null;
+				session.machine = res.payload?.machine || session.machine || null;
+				session.node_id = res.payload?.node_id || null;
+				session.sandbox_enabled = res.payload?.sandbox_enabled;
+				session.executionRoute =
+					res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route || "local";
 				session.dataVersion.value++;
 			}
+			updateSandboxUI(
+				(res.payload?.executionRoute || res.payload?.machine?.executionRoute || res.payload?.machine?.route) ===
+					"sandbox",
+			);
+			restoreMachineSelection(res.payload?.machine?.id || targetMachineId);
 			fetchSessions();
 		})
 		.finally(() => {
-			setSwitchingNode(false);
+			setSwitchingMachine(false);
 		});
 }
 
@@ -626,7 +644,12 @@ function getSessionHeaderDisplay(session, currentKey, nameOwnLine, defaultAgentI
 		replying: session?.replying.value,
 		activeRunId: session?.activeRunId.value || null,
 		currentAgentId: session?.agent_id || defaultAgentId || "main",
-		currentNodeId: session?.node_id || "",
+		currentMachineId:
+			session?.machine?.id ||
+			(session?.executionRoute === "sandbox" ? "sandbox" : null) ||
+			(session?.executionRoute === "local" ? "local" : null) ||
+			session?.node_id ||
+			(session?.sandbox_enabled === true ? "sandbox" : "local"),
 		workspaceLabel: session?.workspaceLabel || session?.workspace || "",
 		routeLabel: executionRouteLabel(session?.executionRoute || "local"),
 		sourceLabel: externalSourceLabel(session?.externalAgentSource || "native"),
@@ -648,8 +671,9 @@ function showAgentPickerForSession(isCron, agentOptionsLoaded, agentOptions, age
 	return !isCron && agentOptionsLoaded && (agentOptions.length > 1 || !agentPicker.hasCurrentAgentOption);
 }
 
-function showNodePickerForSession(isCron, nodeOptions, currentNodeId) {
-	return !isCron && (nodeOptions.length > 0 || Boolean(currentNodeId));
+function showMachinePickerForSession(isCron, machineOptions, currentMachineId) {
+	var selectableMachines = selectableNonLocalMachines(machineOptions);
+	return !isCron && (selectableMachines.length > 0 || Boolean(currentMachineId && currentMachineId !== "local"));
 }
 
 export function SessionHeader({
@@ -678,8 +702,8 @@ export function SessionHeader({
 	var [agentOptions, setAgentOptions] = useState(initialAgentOptions);
 	var [defaultAgentId, setDefaultAgentId] = useState(initialDefaultAgentId);
 	var [agentOptionsLoaded, setAgentOptionsLoaded] = useState(initialAgentOptions.length > 0);
-	var [nodeOptions, setNodeOptions] = useState([]);
-	var [switchingNode, setSwitchingNode] = useState(false);
+	var [machineOptions, setMachineOptions] = useState([]);
+	var [switchingMachine, setSwitchingMachine] = useState(false);
 	var inputRef = useRef(null);
 
 	var {
@@ -688,7 +712,7 @@ export function SessionHeader({
 		replying,
 		activeRunId,
 		currentAgentId,
-		currentNodeId,
+		currentMachineId,
 		workspaceLabel,
 		routeLabel,
 		sourceLabel,
@@ -703,17 +727,21 @@ export function SessionHeader({
 		};
 	}, [currentKey]);
 
-	// Fetch connected nodes and subscribe to presence updates.
+	// Fetch execution machines and subscribe to availability updates.
 	useEffect(() => {
 		var cancelled = false;
-		var fetchNodes = () => refreshNodeOptions(setNodeOptions, () => cancelled);
-		fetchNodes();
-		var unsub = onEvent("presence", () => {
-			if (!cancelled) fetchNodes();
+		var fetchMachines = () => refreshMachineOptions(setMachineOptions, () => cancelled);
+		fetchMachines();
+		var unsubPresence = onEvent("presence", () => {
+			if (!cancelled) fetchMachines();
+		});
+		var unsubTelemetry = onEvent("node.telemetry", () => {
+			if (!cancelled) fetchMachines();
 		});
 		return () => {
 			cancelled = true;
-			unsub();
+			unsubPresence();
+			unsubTelemetry();
 		};
 	}, [currentKey]);
 
@@ -767,10 +795,10 @@ export function SessionHeader({
 	);
 
 	var onNodeChange = useCallback(
-		(nextNodeId) => {
-			switchSessionNode(nextNodeId, switchingNode, setSwitchingNode, currentKey, session);
+		(nextMachineId) => {
+			switchSessionMachine(nextMachineId, currentMachineId, switchingMachine, setSwitchingMachine, currentKey, session);
 		},
-		[currentKey, session, switchingNode],
+		[currentKey, currentMachineId, session, switchingMachine],
 	);
 
 	var agentSelectValue = currentAgentId;
@@ -782,8 +810,8 @@ export function SessionHeader({
 		agentOptionsLoaded,
 	);
 	var shouldShowAgentPicker = showAgentPickerForSession(isCron, agentOptionsLoaded, agentOptions, agentPicker);
-	var nodePicker = buildNodePickerState(nodeOptions, currentNodeId, switchingNode);
-	var shouldShowNodePicker = showNodePickerForSession(isCron, nodeOptions, currentNodeId);
+	var nodePicker = buildMachinePickerState(machineOptions, currentMachineId, switchingMachine);
+	var shouldShowNodePicker = showMachinePickerForSession(isCron, machineOptions, currentMachineId);
 
 	var nameStyle = buildNameStyle(nameOwnLine, canRename);
 	var renameInputStyle = nameOwnLine ? { maxWidth: "none", width: "100%" } : undefined;
@@ -815,9 +843,9 @@ export function SessionHeader({
 		onAgentChange,
 		shouldShowNodePicker,
 		nodePicker,
-		currentNodeId,
+		currentNodeId: currentMachineId,
 		onNodeChange,
-		switchingNode,
+		switchingNode: switchingMachine,
 		showDelete,
 		isMain,
 		actionButtonClass,
