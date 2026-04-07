@@ -304,6 +304,17 @@ test.describe("Chat input and slash commands", () => {
 						project: null,
 						workspaceOverview: {
 							workspaceId: "lab",
+							currentSession: {
+								key: "main",
+								executionRoute: "node",
+								externalAgentSource: "codex",
+								machine: {
+									id: "node:builder",
+									label: "Build box",
+									trustState: "paired_node",
+								},
+							},
+							currentExecutionRoute: "local",
 							recentSessions: [
 								{
 									key: "session:abc",
@@ -351,6 +362,12 @@ test.describe("Chat input and slash commands", () => {
 		await expect(contextCard).toContainText("Managed Remote");
 		await expect(contextCard).toContainText("Source");
 		await expect(contextCard).toContainText("Claude Code");
+		await expect(contextCard).toContainText("Current route");
+		await expect(contextCard).toContainText("Node");
+		await expect(contextCard).toContainText("Current machine");
+		await expect(contextCard).toContainText("Build box");
+		await expect(contextCard).toContainText("Current source");
+		await expect(contextCard).toContainText("Codex");
 		await expect(contextCard).toContainText("Recent Sessions");
 		await expect(contextCard).toContainText("SSH · ssh:prod-host · Codex");
 

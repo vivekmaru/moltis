@@ -1185,7 +1185,7 @@ fn machine_payload(
     route: ExecutionRoute,
     session_entry: Option<&SessionEntry>,
     sandbox_available: bool,
-    connected_node_ids: Option<&HashSet<String>>,
+    connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> Value {
     let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
     match route {
@@ -1195,10 +1195,12 @@ fn machine_payload(
             "route": "local",
             "executionRoute": "local",
             "label": "Local host",
+            "platform": "local",
             "nodeId": Value::Null,
             "trustState": "trusted_local",
             "health": "ready",
             "available": true,
+            "telemetryStale": Value::Null,
         }),
         ExecutionRoute::Sandbox => serde_json::json!({
             "id": "sandbox",
@@ -1206,40 +1208,60 @@ fn machine_payload(
             "route": "sandbox",
             "executionRoute": "sandbox",
             "label": "Sandbox",
+            "platform": "sandbox",
             "nodeId": Value::Null,
             "trustState": "sandboxed",
             "health": if sandbox_available { "ready" } else { "unavailable" },
             "available": sandbox_available,
+            "telemetryStale": Value::Null,
         }),
-        ExecutionRoute::Ssh => serde_json::json!({
-            "id": node_id.unwrap_or("ssh:unresolved"),
-            "kind": "ssh",
-            "route": "ssh",
-            "executionRoute": "ssh",
-            "label": "SSH target",
-            "nodeId": node_id,
-            "trustState": "managed_ssh",
-            "health": if node_id.is_some() { "ready" } else { "unavailable" },
-            "available": node_id.is_some(),
-        }),
-        ExecutionRoute::Node => serde_json::json!({
-            "id": node_id.unwrap_or("node:unresolved"),
-            "kind": "node",
-            "route": "node",
-            "executionRoute": "node",
-            "label": "Paired node",
-            "nodeId": node_id,
-            "trustState": "paired_node",
-            "health": if node_id
-                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id)))
-            {
-                "ready"
-            } else {
+        ExecutionRoute::Ssh => {
+            serde_json::json!({
+                "id": node_id.unwrap_or("ssh:unresolved"),
+                "kind": "ssh",
+                "route": "ssh",
+                "executionRoute": "ssh",
+                "label": "SSH target",
+                "platform": "ssh",
+                "nodeId": node_id,
+                "trustState": "managed_ssh",
+                "health": if node_id.is_some() { "ready" } else { "unavailable" },
+                "available": node_id.is_some(),
+                "telemetryStale": Value::Null,
+            })
+        },
+        ExecutionRoute::Node => {
+            let connected_node = node_id.and_then(|id| {
+                connected_nodes.and_then(|nodes| nodes.iter().find(|node| node.node_id == id))
+            });
+            let node_available = node_id.is_some_and(|id| {
+                connected_nodes.is_none_or(|nodes| nodes.iter().any(|node| node.node_id == id))
+            });
+            let node_label = connected_node
+                .and_then(|node| node.display_name.as_deref())
+                .or(node_id)
+                .unwrap_or("Paired node");
+            let node_health = if !node_available {
                 "unavailable"
-            },
-            "available": node_id
-                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id))),
-        }),
+            } else if connected_node.is_some_and(|node| node.telemetry_stale) {
+                "degraded"
+            } else {
+                "ready"
+            };
+            serde_json::json!({
+                "id": node_id.unwrap_or("node:unresolved"),
+                "kind": "node",
+                "route": "node",
+                "executionRoute": "node",
+                "label": node_label,
+                "platform": connected_node.map(|node| node.platform.as_str()).unwrap_or("node"),
+                "nodeId": node_id,
+                "trustState": "paired_node",
+                "health": node_health,
+                "available": node_available,
+                "telemetryStale": connected_node.map(|node| node.telemetry_stale),
+            })
+        },
     }
 }
 
@@ -1262,17 +1284,11 @@ async fn resolve_execution_context_with_connected_nodes(
     connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> ResolvedExecutionContext {
     let route = effective_execution_route(state, session_key, session_entry).await;
-    let connected_node_ids = connected_nodes.map(|nodes| {
-        nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<HashSet<_>>()
-    });
     let machine = machine_payload(
         route,
         session_entry,
         sandbox_machine_available(state),
-        connected_node_ids.as_ref(),
+        connected_nodes,
     );
     ResolvedExecutionContext { route, machine }
 }
@@ -1299,6 +1315,104 @@ fn recent_session_summary_payload(
         "executionRoute": execution_context.route.as_str(),
         "machine": execution_context.machine,
         "externalAgentSource": normalize_external_agent_source(entry.external_agent_source).as_str(),
+    })
+}
+
+fn active_session_payload(
+    session_key: &str,
+    message_count: u32,
+    session_entry: Option<&SessionEntry>,
+    execution_context: &ResolvedExecutionContext,
+    channel_context: &ChannelRuntimeContext,
+    workspace_label: Option<&Value>,
+    provider_name: Option<&str>,
+) -> Value {
+    let external_agent_source = normalize_external_agent_source(
+        session_entry.and_then(|entry| entry.external_agent_source),
+    );
+    serde_json::json!({
+        "key": session_key,
+        "messageCount": message_count,
+        "model": session_entry.and_then(|entry| entry.model.as_deref()),
+        "provider": provider_name,
+        "label": session_entry.and_then(|entry| entry.label.as_deref()),
+        "projectId": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspace": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspaceLabel": workspace_label.cloned().unwrap_or(Value::Null),
+        "surface": channel_context.surface.as_deref(),
+        "sessionKind": channel_context.session_kind.as_deref(),
+        "executionRoute": execution_context.route.as_str(),
+        "machine": execution_context.machine.clone(),
+        "externalAgentSource": external_agent_source.as_str(),
+    })
+}
+
+fn coordination_payload(coordination: &CoordinationState) -> Value {
+    serde_json::json!({
+        "decision": coordination.decision,
+        "currentPlan": coordination.current_plan,
+        "nextAction": coordination.next_action,
+        "routeConstraints": coordination.route_constraints,
+        "durableNotes": coordination.durable_notes,
+    })
+}
+
+fn external_activities_payload(activities: &[coordinator::ExternalActivity]) -> Vec<Value> {
+    activities
+        .iter()
+        .map(|activity| {
+            serde_json::json!({
+                "id": activity.id,
+                "source": activity.source.as_str(),
+                "title": activity.title,
+                "summary": activity.summary,
+                "link": activity.link,
+                "attachedAt": activity.attached_at,
+                "importedSessionKey": activity.imported_session_key,
+                "importedMessageCount": activity.imported_message_count,
+            })
+        })
+        .collect()
+}
+
+fn external_activity_summary_payload(activities: &[coordinator::ExternalActivity]) -> Value {
+    let source_counts = activities.iter().fold(
+        BTreeMap::<&'static str, u64>::new(),
+        |mut counts, activity| {
+            *counts.entry(activity.source.as_str()).or_default() += 1;
+            counts
+        },
+    );
+    serde_json::json!({
+        "count": activities.len(),
+        "sources": source_counts,
+    })
+}
+
+fn workspace_overview_payload(
+    session_entry: Option<&SessionEntry>,
+    workspace_label: Option<&Value>,
+    linked_project: &Value,
+    current_session: &Value,
+    execution_context: &ResolvedExecutionContext,
+    approval_mode: &str,
+    coordination: &CoordinationState,
+    recent_sessions: Vec<Value>,
+) -> Value {
+    serde_json::json!({
+        "workspaceId": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspaceLabel": workspace_label.cloned().unwrap_or(Value::Null),
+        "currentSession": current_session.clone(),
+        "linkedProject": linked_project.clone(),
+        "currentBranch": session_entry.and_then(|entry| entry.worktree_branch.as_deref()),
+        "currentExecutionRoute": execution_context.route.as_str(),
+        "machine": execution_context.machine.clone(),
+        "approvalMode": approval_mode,
+        "coordination": coordination_payload(coordination),
+        "memorySummary": coordination.durable_notes,
+        "externalActivities": external_activities_payload(&coordination.external_activities),
+        "externalActivitySummary": external_activity_summary_payload(&coordination.external_activities),
+        "recentSessions": recent_sessions,
     })
 }
 
@@ -4805,25 +4919,6 @@ impl ChatService for LiveChatService {
         )
         .await;
         let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
-        let external_agent_source = normalize_external_agent_source(
-            session_entry
-                .as_ref()
-                .and_then(|entry| entry.external_agent_source),
-        );
-        let session_info = serde_json::json!({
-            "key": session_key,
-            "messageCount": message_count,
-            "model": session_entry.as_ref().and_then(|e| e.model.as_deref()),
-            "provider": provider_name,
-            "label": session_entry.as_ref().and_then(|e| e.label.as_deref()),
-            "projectId": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
-            "workspace": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
-            "surface": surface_ctx.surface,
-            "sessionKind": surface_ctx.session_kind,
-            "executionRoute": execution_context.route.as_str(),
-            "machine": execution_context.machine,
-            "externalAgentSource": external_agent_source.as_str(),
-        });
 
         // Project info & context files
         let conn_id = params
@@ -4904,6 +4999,15 @@ impl ChatService for LiveChatService {
             Vec::new()
         };
         let workspace_linked_project = project_info.clone();
+        let session_info = active_session_payload(
+            &session_key,
+            message_count,
+            session_entry.as_ref(),
+            &execution_context,
+            &surface_ctx,
+            workspace_linked_project.get("label"),
+            provider_name.as_deref(),
+        );
 
         // Tools (only include if the provider supports tool calling)
         let mcp_disabled = session_entry
@@ -5009,36 +5113,18 @@ impl ChatService for LiveChatService {
         };
 
         Ok(serde_json::json!({
-            "session": session_info,
+            "session": session_info.clone(),
             "project": project_info,
-            "workspaceOverview": {
-                "workspaceId": session_entry.as_ref().and_then(|entry| entry.project_id.as_deref()),
-                "workspaceLabel": workspace_linked_project.get("label"),
-                "linkedProject": workspace_linked_project,
-                "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
-                "currentExecutionRoute": execution_context.route.as_str(),
-                "machine": execution_context.machine.clone(),
-                "approvalMode": config.tools.exec.approval_mode,
-                "coordination": {
-                    "decision": coordination.decision,
-                    "currentPlan": coordination.current_plan,
-                    "nextAction": coordination.next_action,
-                    "routeConstraints": coordination.route_constraints,
-                    "durableNotes": coordination.durable_notes,
-                },
-                "memorySummary": coordination.durable_notes,
-                "externalActivities": coordination.external_activities.iter().map(|activity| serde_json::json!({
-                    "id": activity.id,
-                    "source": activity.source.as_str(),
-                    "title": activity.title,
-                    "summary": activity.summary,
-                    "link": activity.link,
-                    "attachedAt": activity.attached_at,
-                    "importedSessionKey": activity.imported_session_key,
-                    "importedMessageCount": activity.imported_message_count,
-                })).collect::<Vec<_>>(),
-                "recentSessions": recent_sessions,
-            },
+            "workspaceOverview": workspace_overview_payload(
+                session_entry.as_ref(),
+                workspace_linked_project.get("label"),
+                &workspace_linked_project,
+                &session_info,
+                &execution_context,
+                &config.tools.exec.approval_mode,
+                &coordination,
+                recent_sessions,
+            ),
             "tools": tools,
             "skills": skills_list,
             "mcpServers": mcp_servers,
@@ -9745,8 +9831,230 @@ mod tests {
         assert_eq!(summary["externalAgentSource"], "claude_code");
     }
 
+    #[test]
+    fn active_session_payload_uses_normalized_runtime_fields() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "main".to_string();
+        entry.label = Some("Main".to_string());
+        entry.project_id = Some("proj-1".to_string());
+        entry.external_agent_source = Some(ExternalAgentSource::Codex);
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Node,
+            machine: serde_json::json!({
+                "id": "node:builder",
+                "executionRoute": "node",
+                "kind": "node",
+                "label": "Build box",
+                "available": true,
+            }),
+        };
+        let channel_context = ChannelRuntimeContext {
+            surface: Some("web".to_string()),
+            session_kind: Some("web".to_string()),
+            ..Default::default()
+        };
+
+        let payload = active_session_payload(
+            "main",
+            7,
+            Some(&entry),
+            &execution_context,
+            &channel_context,
+            Some(&Value::String("Workspace One".to_string())),
+            Some("openai"),
+        );
+
+        assert_eq!(payload["key"], "main");
+        assert_eq!(payload["messageCount"], 7);
+        assert_eq!(payload["workspace"], "proj-1");
+        assert_eq!(payload["workspaceLabel"], "Workspace One");
+        assert_eq!(payload["surface"], "web");
+        assert_eq!(payload["sessionKind"], "web");
+        assert_eq!(payload["executionRoute"], "node");
+        assert_eq!(payload["machine"]["label"], "Build box");
+        assert_eq!(payload["externalAgentSource"], "codex");
+        assert_eq!(payload["provider"], "openai");
+    }
+
+    #[test]
+    fn active_session_payload_defaults_workspace_label_to_null() {
+        let entry = make_session_entry_with_binding(None);
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Local,
+            machine: serde_json::json!({
+                "id": "local",
+                "executionRoute": "local",
+                "kind": "local",
+                "label": "Local host",
+                "available": true,
+            }),
+        };
+
+        let payload = active_session_payload(
+            "main",
+            0,
+            Some(&entry),
+            &execution_context,
+            &ChannelRuntimeContext::default(),
+            None,
+            None,
+        );
+
+        assert_eq!(payload["workspaceLabel"], Value::Null);
+        assert_eq!(payload["externalAgentSource"], "native");
+    }
+
+    #[test]
+    fn external_activity_summary_payload_counts_sources() {
+        let activities = vec![
+            coordinator::ExternalActivity {
+                id: "a1".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: Some("Review".to_string()),
+                summary: "Checked the branch".to_string(),
+                link: None,
+                attached_at: 1,
+                imported_session_key: None,
+                imported_message_count: Some(5),
+            },
+            coordinator::ExternalActivity {
+                id: "a2".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: None,
+                summary: "Captured notes".to_string(),
+                link: None,
+                attached_at: 2,
+                imported_session_key: None,
+                imported_message_count: None,
+            },
+            coordinator::ExternalActivity {
+                id: "a3".to_string(),
+                source: ExternalAgentSource::ClaudeCode,
+                title: None,
+                summary: "Validation".to_string(),
+                link: None,
+                attached_at: 3,
+                imported_session_key: Some("session:123".to_string()),
+                imported_message_count: Some(3),
+            },
+        ];
+
+        let summary = external_activity_summary_payload(&activities);
+        assert_eq!(summary["count"], 3);
+        assert_eq!(summary["sources"]["codex"], 2);
+        assert_eq!(summary["sources"]["claude_code"], 1);
+    }
+
+    #[test]
+    fn workspace_overview_payload_uses_normalized_current_session_and_coordination() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.project_id = Some("workspace-1".to_string());
+        entry.worktree_branch = Some("feat/test".to_string());
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Node,
+            machine: serde_json::json!({
+                "id": "node:builder",
+                "kind": "node",
+                "label": "Build box",
+                "executionRoute": "node",
+                "available": true,
+            }),
+        };
+        let current_session = serde_json::json!({
+            "key": "main",
+            "workspace": "workspace-1",
+            "workspaceLabel": "Workspace One",
+            "executionRoute": "node",
+            "externalAgentSource": "codex",
+            "machine": {
+                "id": "node:builder",
+                "label": "Build box",
+            },
+        });
+        let coordination = CoordinationState {
+            decision: Some("Use the build node".to_string()),
+            current_plan: Some("Run validation remotely".to_string()),
+            next_action: Some("Ship the patch".to_string()),
+            route_constraints: Some("Keep commands off the local host".to_string()),
+            durable_notes: Some("Remote-first workflow".to_string()),
+            external_activities: vec![coordinator::ExternalActivity {
+                id: "a1".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: Some("Patch".to_string()),
+                summary: "Updated runtime payloads".to_string(),
+                link: None,
+                attached_at: 7,
+                imported_session_key: Some("session:abc".to_string()),
+                imported_message_count: Some(9),
+            }],
+        };
+        let recent_sessions = vec![serde_json::json!({
+            "key": "recent-1",
+            "executionRoute": "node",
+            "externalAgentSource": "codex",
+        })];
+
+        let payload = workspace_overview_payload(
+            Some(&entry),
+            Some(&Value::String("Workspace One".to_string())),
+            &serde_json::json!({
+                "id": "workspace-1",
+                "label": "Workspace One",
+            }),
+            &current_session,
+            &execution_context,
+            "smart",
+            &coordination,
+            recent_sessions,
+        );
+
+        assert_eq!(payload["workspaceId"], "workspace-1");
+        assert_eq!(payload["workspaceLabel"], "Workspace One");
+        assert_eq!(payload["currentSession"]["executionRoute"], "node");
+        assert_eq!(payload["currentSession"]["externalAgentSource"], "codex");
+        assert_eq!(payload["currentBranch"], "feat/test");
+        assert_eq!(payload["currentExecutionRoute"], "node");
+        assert_eq!(payload["machine"]["id"], "node:builder");
+        assert_eq!(payload["approvalMode"], "smart");
+        assert_eq!(payload["coordination"]["decision"], "Use the build node");
+        assert_eq!(payload["memorySummary"], "Remote-first workflow");
+        assert_eq!(payload["externalActivitySummary"]["count"], 1);
+        assert_eq!(payload["externalActivitySummary"]["sources"]["codex"], 1);
+        assert_eq!(
+            payload["externalActivities"][0]["importedSessionKey"],
+            "session:abc"
+        );
+        assert_eq!(payload["recentSessions"][0]["key"], "recent-1");
+    }
+
     #[tokio::test]
     async fn recent_session_summary_payload_uses_normalized_machine_state() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "worker".to_string();
+        entry.node_id = Some("node:ready".to_string());
+
+        let connected_nodes = vec![connected_node_summary("node:ready")];
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        let summary = recent_session_summary_payload(&entry, &execution_context);
+        assert_eq!(summary["executionRoute"], "node");
+        assert_eq!(summary["machine"]["id"], "node:ready");
+        assert_eq!(summary["machine"]["label"], "node:ready");
+        assert_eq!(summary["machine"]["platform"], "linux");
+        assert_eq!(summary["machine"]["available"], true);
+        assert_eq!(summary["machine"]["health"], "ready");
+        assert_eq!(summary["machine"]["telemetryStale"], false);
+    }
+
+    #[tokio::test]
+    async fn recent_session_summary_payload_marks_missing_node_unavailable() {
         let runtime = mock_runtime();
         let mut entry = make_session_entry_with_binding(None);
         entry.key = "worker".to_string();
@@ -9824,6 +10132,19 @@ mod tests {
         }
     }
 
+    fn connected_node_summary_with_display_name(
+        node_id: &str,
+        display_name: &str,
+        telemetry_stale: bool,
+    ) -> runtime::ConnectedNodeSummary {
+        runtime::ConnectedNodeSummary {
+            node_id: node_id.to_string(),
+            display_name: Some(display_name.to_string()),
+            telemetry_stale,
+            ..connected_node_summary(node_id)
+        }
+    }
+
     #[tokio::test]
     async fn resolve_execution_context_marks_disconnected_node_unavailable() {
         let runtime = mock_runtime();
@@ -9866,6 +10187,59 @@ mod tests {
         assert_eq!(resolved.machine["id"], "node:ready");
         assert_eq!(resolved.machine["available"], true);
         assert_eq!(resolved.machine["health"], "ready");
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_uses_connected_node_display_name() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:builder".to_string());
+
+        let connected_nodes = vec![connected_node_summary_with_display_name(
+            "node:builder",
+            "Build box",
+            false,
+        )];
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.machine["id"], "node:builder");
+        assert_eq!(resolved.machine["label"], "Build box");
+        assert_eq!(resolved.machine["platform"], "linux");
+        assert_eq!(resolved.machine["health"], "ready");
+        assert_eq!(resolved.machine["telemetryStale"], false);
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_marks_stale_connected_node_degraded() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:stale".to_string());
+
+        let connected_nodes = vec![connected_node_summary_with_display_name(
+            "node:stale",
+            "Stale box",
+            true,
+        )];
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.machine["id"], "node:stale");
+        assert_eq!(resolved.machine["label"], "Stale box");
+        assert_eq!(resolved.machine["platform"], "linux");
+        assert_eq!(resolved.machine["available"], true);
+        assert_eq!(resolved.machine["health"], "degraded");
+        assert_eq!(resolved.machine["telemetryStale"], true);
     }
 
     #[tokio::test]

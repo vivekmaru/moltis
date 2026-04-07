@@ -401,9 +401,17 @@ function hasWorkspaceOverviewState(overview, coordination, externalActivities) {
 
 function renderContextWorkspaceOverviewSection(card, data) {
 	var overview = data.workspaceOverview || {};
+	var currentSession = overview.currentSession || null;
 	var section = ctxSection("Workspace Overview");
 	appendWorkspaceOverviewRow(section, "Workspace", overview.workspaceLabel || overview.workspaceId);
-	appendWorkspaceOverviewRow(section, "Current route", overview.currentExecutionRoute, true);
+	appendWorkspaceOverviewRow(
+		section,
+		"Current route",
+		contextRouteLabel(currentSession?.executionRoute || overview.currentExecutionRoute),
+		true,
+	);
+	appendWorkspaceOverviewRow(section, "Current machine", contextMachineLabel(currentSession?.machine));
+	appendWorkspaceOverviewRow(section, "Current source", contextSourceLabel(currentSession?.externalAgentSource));
 	appendWorkspaceOverviewRow(section, "Approvals", overview.approvalMode);
 	appendWorkspaceOverviewRow(section, "Branch", overview.currentBranch, true);
 
