@@ -64,6 +64,15 @@ impl ExecutionRoute {
     }
 }
 
+fn execution_route_for_machine_kind(kind: crate::machine::MachineKind) -> ExecutionRoute {
+    match kind {
+        crate::machine::MachineKind::Local => ExecutionRoute::Local,
+        crate::machine::MachineKind::Sandbox => ExecutionRoute::Sandbox,
+        crate::machine::MachineKind::Ssh => ExecutionRoute::Ssh,
+        crate::machine::MachineKind::Node => ExecutionRoute::Node,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionKind {
     Web,
@@ -1083,23 +1092,17 @@ impl LiveSessionService {
     }
 
     async fn effective_execution_route(&self, entry: &SessionEntry) -> ExecutionRoute {
-        if let Some(node_id) = entry.node_id.as_deref() {
-            return if node_id.starts_with("ssh:") {
-                ExecutionRoute::Ssh
-            } else {
-                ExecutionRoute::Node
-            };
-        }
+        let sandbox_active = crate::machine::effective_session_sandbox_active(
+            self.sandbox_router.as_ref(),
+            &entry.key,
+            entry,
+        )
+        .await;
 
-        if let Some(ref router) = self.sandbox_router {
-            if router.is_sandboxed(&entry.key).await {
-                return ExecutionRoute::Sandbox;
-            }
-        } else if entry.sandbox_enabled == Some(true) {
-            return ExecutionRoute::Sandbox;
-        }
-
-        ExecutionRoute::Local
+        execution_route_for_machine_kind(crate::machine::session_machine_kind(
+            entry,
+            sandbox_active,
+        ))
     }
 
     async fn workspace_label(&self, project_id: Option<&str>) -> Option<String> {
@@ -1132,38 +1135,25 @@ impl LiveSessionService {
             .map(str::trim)
             .filter(|machine_id| !machine_id.is_empty())
             .unwrap_or(crate::machine::LOCAL_MACHINE_ID);
+        let machine = crate::machine::session_binding_from_machine_id(
+            normalized_machine_id,
+            self.sandbox_router
+                .as_ref()
+                .is_some_and(|router| router.backend().is_real()),
+        );
+        let legacy_binding = crate::machine::legacy_session_binding(&machine);
 
-        match normalized_machine_id {
-            crate::machine::LOCAL_MACHINE_ID => {
-                let _ = self.metadata.set_node_id(session_key, None).await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(false))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, false).await;
-                }
-            },
-            crate::machine::SANDBOX_MACHINE_ID => {
-                let _ = self.metadata.set_node_id(session_key, None).await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(true))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, true).await;
-                }
-            },
-            _ => {
-                let _ = self
-                    .metadata
-                    .set_node_id(session_key, Some(normalized_machine_id))
-                    .await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(false))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, false).await;
-                }
-            },
+        let _ = self
+            .metadata
+            .set_node_id(session_key, legacy_binding.node_id.as_deref())
+            .await;
+        self.metadata
+            .set_sandbox_enabled(session_key, Some(legacy_binding.sandbox_enabled))
+            .await;
+        if let Some(ref router) = self.sandbox_router {
+            router
+                .set_override(session_key, legacy_binding.sandbox_enabled)
+                .await;
         }
     }
 

@@ -378,6 +378,17 @@ pub fn sandbox_machine_available(state: &GatewayState) -> bool {
     sandbox_router_available(state.sandbox_router.as_ref())
 }
 
+pub async fn effective_session_sandbox_active(
+    router: Option<&Arc<SandboxRouter>>,
+    session_key: &str,
+    entry: &SessionEntry,
+) -> bool {
+    if let Some(router) = router {
+        return router.is_sandboxed(session_key).await;
+    }
+    entry.sandbox_enabled == Some(true)
+}
+
 pub async fn list_machines_from_state(state: &GatewayState) -> Vec<MachineDescriptor> {
     let mut machines = vec![MachineDescriptor::local()];
 
@@ -556,7 +567,11 @@ pub fn live_session_machine_descriptor_for_inventory(
 
 #[cfg(test)]
 mod tests {
-    use {super::*, moltis_sessions::metadata::SessionEntry};
+    use {
+        super::*,
+        moltis_sessions::metadata::SessionEntry,
+        moltis_tools::sandbox::{DockerSandbox, Sandbox, SandboxConfig, SandboxMode},
+    };
 
     fn session_entry(key: &str) -> SessionEntry {
         SessionEntry {
@@ -595,6 +610,30 @@ mod tests {
             MachineDescriptor::session_binding(MachineKind::Sandbox, None, true).id,
             SANDBOX_MACHINE_ID
         );
+    }
+
+    #[tokio::test]
+    async fn effective_session_sandbox_active_falls_back_to_entry_flag_without_router() {
+        let mut entry = session_entry("sandboxed");
+        entry.sandbox_enabled = Some(true);
+        assert!(effective_session_sandbox_active(None, &entry.key, &entry).await);
+
+        entry.sandbox_enabled = Some(false);
+        assert!(!effective_session_sandbox_active(None, &entry.key, &entry).await);
+    }
+
+    #[tokio::test]
+    async fn effective_session_sandbox_active_prefers_router_state_over_entry_flag() {
+        let config = SandboxConfig {
+            mode: SandboxMode::Off,
+            ..Default::default()
+        };
+        let backend: Arc<dyn Sandbox> = Arc::new(DockerSandbox::new(config.clone()));
+        let router = Arc::new(SandboxRouter::with_backend(config, backend));
+        let mut entry = session_entry("sandboxed");
+        entry.sandbox_enabled = Some(true);
+
+        assert!(!effective_session_sandbox_active(Some(&router), &entry.key, &entry).await);
     }
 
     #[test]

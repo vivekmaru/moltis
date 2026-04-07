@@ -2633,17 +2633,6 @@ async fn session_event_workspace_label(
         })
 }
 
-async fn session_event_sandbox_active(
-    state: &GatewayState,
-    entry: &moltis_sessions::metadata::SessionEntry,
-) -> bool {
-    if let Some(router) = state.sandbox_router.as_ref() {
-        router.is_sandboxed(&entry.key).await
-    } else {
-        entry.sandbox_enabled == Some(true)
-    }
-}
-
 async fn present_session_event_entry(
     state: &Arc<GatewayState>,
     entry: &moltis_sessions::metadata::SessionEntry,
@@ -2651,7 +2640,11 @@ async fn present_session_event_entry(
     let (active_channel, workspace_label, sandbox_active) = tokio::join!(
         session_event_active_channel(state, entry),
         session_event_workspace_label(state, entry.project_id.as_deref()),
-        session_event_sandbox_active(state, entry),
+        moltis_gateway::machine::effective_session_sandbox_active(
+            state.sandbox_router.as_ref(),
+            &entry.key,
+            entry,
+        ),
     );
     let preview = session_event_preview(entry.preview.as_deref());
     let (surface, session_kind) = session_event_surface(entry);

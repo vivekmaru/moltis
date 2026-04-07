@@ -1157,25 +1157,45 @@ fn normalize_external_agent_source(source: Option<ExternalAgentSource>) -> Exter
     source.unwrap_or(ExternalAgentSource::Native)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LegacyExecutionBinding<'a> {
+    node_id: Option<&'a str>,
+    route: ExecutionRoute,
+}
+
+fn legacy_execution_binding(session_entry: Option<&SessionEntry>) -> LegacyExecutionBinding<'_> {
+    let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
+    let route = if let Some(node_id) = node_id {
+        if node_id.starts_with("ssh:") {
+            ExecutionRoute::Ssh
+        } else {
+            ExecutionRoute::Node
+        }
+    } else if session_entry.and_then(|entry| entry.sandbox_enabled) == Some(true) {
+        ExecutionRoute::Sandbox
+    } else {
+        ExecutionRoute::Local
+    };
+    LegacyExecutionBinding { node_id, route }
+}
+
 async fn effective_execution_route(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     session_entry: Option<&SessionEntry>,
 ) -> ExecutionRoute {
-    if let Some(node_id) = session_entry.and_then(|entry| entry.node_id.as_deref()) {
-        return if node_id.starts_with("ssh:") {
-            ExecutionRoute::Ssh
-        } else {
-            ExecutionRoute::Node
-        };
+    let binding = legacy_execution_binding(session_entry);
+
+    if binding.node_id.is_some() {
+        return binding.route;
     }
 
     if let Some(router) = state.sandbox_router() {
         if router.is_sandboxed(session_key).await {
             return ExecutionRoute::Sandbox;
         }
-    } else if session_entry.and_then(|entry| entry.sandbox_enabled) == Some(true) {
-        return ExecutionRoute::Sandbox;
+    } else if binding.route == ExecutionRoute::Sandbox {
+        return binding.route;
     }
 
     ExecutionRoute::Local
@@ -1187,7 +1207,8 @@ fn machine_payload(
     sandbox_available: bool,
     connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> Value {
-    let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
+    let binding = legacy_execution_binding(session_entry);
+    let node_id = binding.node_id;
     match route {
         ExecutionRoute::Local => serde_json::json!({
             "id": "local",
@@ -1298,7 +1319,9 @@ fn default_connected_node_id(
     route: ExecutionRoute,
 ) -> Option<String> {
     match route {
-        ExecutionRoute::Node => session_entry.and_then(|entry| entry.node_id.clone()),
+        ExecutionRoute::Node => legacy_execution_binding(session_entry)
+            .node_id
+            .map(ToOwned::to_owned),
         ExecutionRoute::Local | ExecutionRoute::Sandbox | ExecutionRoute::Ssh => None,
     }
 }
@@ -9818,6 +9841,17 @@ mod tests {
             Some(true)
         );
         assert_eq!(execution_root_for_route(ExecutionRoute::Node, None), None);
+    }
+
+    #[test]
+    fn legacy_execution_binding_prefers_remote_binding_over_sandbox_flag() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("ssh:target:42".to_string());
+        entry.sandbox_enabled = Some(true);
+
+        let binding = legacy_execution_binding(Some(&entry));
+        assert_eq!(binding.node_id, Some("ssh:target:42"));
+        assert_eq!(binding.route, ExecutionRoute::Ssh);
     }
 
     #[test]
