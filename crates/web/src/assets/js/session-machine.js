@@ -70,7 +70,9 @@ export function resolveSessionSandboxEnabled(entry, route = resolveSessionExecut
 
 export function normalizeSessionMachine(entry, fallbackMachine = null) {
 	var route = resolveSessionExecutionRoute(entry);
-	var machine = entry?.machine || fallbackMachine || null;
+	var hasExplicitMachine = Boolean(entry?.machine?.id);
+	var hasNormalizedRoute = Boolean(entry?.machine?.executionRoute || entry?.machine?.route || entry?.executionRoute);
+	var machine = entry?.machine || (!hasExplicitMachine && hasNormalizedRoute ? fallbackMachine : null) || null;
 	if (machine?.id) return machine;
 	var machineId = resolveSessionMachineId(entry, route);
 	return {

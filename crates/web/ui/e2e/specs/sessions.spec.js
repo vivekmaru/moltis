@@ -310,6 +310,65 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("legacy-only session updates rebuild normalized machine payload", async ({ page }) => {
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		const result = await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const sessionMachine = await import(`${prefix}js/session-machine.js`);
+
+			const target = {
+				key: "legacy:session",
+				machine: {
+					id: "ssh:old-box",
+					kind: "ssh",
+					route: "ssh",
+					executionRoute: "ssh",
+					label: "SSH: old-box",
+					available: true,
+					nodeId: "ssh:old-box",
+				},
+				node_id: "ssh:old-box",
+				sandbox_enabled: false,
+				executionRoute: "ssh",
+			};
+
+			sessionMachine.applySessionMachinePayload(
+				target,
+				{
+					key: "legacy:session",
+					node_id: "node:new-box",
+					sandbox_enabled: false,
+				},
+				target.machine,
+			);
+
+			return {
+				executionRoute: target.executionRoute,
+				machineId: target.machine?.id || null,
+				machineKind: target.machine?.kind || null,
+				machineRoute: target.machine?.executionRoute || null,
+				node_id: target.node_id,
+				sandbox_enabled: target.sandbox_enabled,
+			};
+		});
+
+		expect(result).toEqual({
+			executionRoute: "node",
+			machineId: "node:new-box",
+			machineKind: "node",
+			machineRoute: "node",
+			node_id: "node:new-box",
+			sandbox_enabled: false,
+		});
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("sessions sidebar uses search and add button row", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
