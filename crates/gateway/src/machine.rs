@@ -122,6 +122,12 @@ pub struct MachineDescriptor {
     pub commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacySessionBinding {
+    pub node_id: Option<String>,
+    pub sandbox_enabled: bool,
+}
+
 impl MachineDescriptor {
     #[must_use]
     pub fn local() -> Self {
@@ -301,6 +307,19 @@ impl MachineDescriptor {
             capabilities: vec!["system.run".to_string()],
             commands: vec!["ssh-system".to_string()],
         }
+    }
+}
+
+#[must_use]
+pub fn legacy_session_binding(machine: &MachineDescriptor) -> LegacySessionBinding {
+    LegacySessionBinding {
+        node_id: match machine.kind {
+            MachineKind::Local | MachineKind::Sandbox => None,
+            MachineKind::Ssh | MachineKind::Node => {
+                machine.node_id.clone().or_else(|| Some(machine.id.clone()))
+            },
+        },
+        sandbox_enabled: machine.kind == MachineKind::Sandbox,
     }
 }
 
@@ -626,6 +645,25 @@ mod tests {
         assert_eq!(machine.kind, MachineKind::Ssh);
         assert_eq!(machine.id, "ssh:target:42");
         assert_eq!(machine.execution_route, "ssh");
+    }
+
+    #[test]
+    fn legacy_session_binding_uses_machine_contract() {
+        let local = legacy_session_binding(&MachineDescriptor::local());
+        assert_eq!(local.node_id, None);
+        assert!(!local.sandbox_enabled);
+
+        let sandbox = legacy_session_binding(&MachineDescriptor::sandbox(true));
+        assert_eq!(sandbox.node_id, None);
+        assert!(sandbox.sandbox_enabled);
+
+        let ssh = legacy_session_binding(&MachineDescriptor::session_binding(
+            MachineKind::Ssh,
+            Some("ssh:target:42"),
+            false,
+        ));
+        assert_eq!(ssh.node_id.as_deref(), Some("ssh:target:42"));
+        assert!(!ssh.sandbox_enabled);
     }
 
     #[test]

@@ -2658,6 +2658,7 @@ async fn present_session_event_entry(
     let machine_descriptor =
         moltis_gateway::machine::live_session_machine_descriptor(state, entry, sandbox_active)
             .await;
+    let legacy_binding = moltis_gateway::machine::legacy_session_binding(&machine_descriptor);
     let execution_route = machine_descriptor.execution_route;
     let machine = serde_json::to_value(&machine_descriptor).unwrap_or_else(|_| {
         serde_json::json!({
@@ -2686,7 +2687,7 @@ async fn present_session_event_entry(
         "projectId": entry.project_id,
         "workspace": entry.project_id,
         "workspaceLabel": workspace_label,
-        "sandbox_enabled": entry.sandbox_enabled,
+        "sandbox_enabled": legacy_binding.sandbox_enabled,
         "sandbox_image": entry.sandbox_image,
         "worktree_branch": entry.worktree_branch,
         "channelBinding": entry.channel_binding,
@@ -2698,7 +2699,7 @@ async fn present_session_event_entry(
         "archived": entry.archived,
         "agent_id": agent_id.clone(),
         "agentId": agent_id,
-        "node_id": entry.node_id,
+        "node_id": legacy_binding.node_id,
         "surface": surface,
         "sessionKind": session_kind,
         "executionRoute": execution_route,

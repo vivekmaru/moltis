@@ -257,11 +257,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
 
                 let machine = match machine_id {
                     LOCAL_MACHINE_ID => {
-                        meta.set_node_id(session_key, None)
-                            .await
-                            .map_err(|e| {
-                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
-                            })?;
+                        meta.set_node_id(session_key, None).await.map_err(|e| {
+                            ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                        })?;
                         meta.set_sandbox_enabled(session_key, Some(false)).await;
                         if let Some(router) = ctx.state.sandbox_router.as_ref() {
                             router.set_override(session_key, false).await;
@@ -275,11 +273,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 "sandbox machine is not available",
                             ));
                         }
-                        meta.set_node_id(session_key, None)
-                            .await
-                            .map_err(|e| {
-                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
-                            })?;
+                        meta.set_node_id(session_key, None).await.map_err(|e| {
+                            ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                        })?;
                         meta.set_sandbox_enabled(session_key, Some(true)).await;
                         if let Some(router) = ctx.state.sandbox_router.as_ref() {
                             router.set_override(session_key, true).await;
@@ -332,16 +328,14 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 )
                 .await;
 
+                let legacy_binding = crate::machine::legacy_session_binding(&machine);
+
                 Ok(serde_json::json!({
                     "ok": true,
                     "machine": machine,
                     "machineId": machine.id,
-                    "node_id": if machine.kind.as_str() == "local" || machine.kind.as_str() == "sandbox" {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::json!(machine.node_id)
-                    },
-                    "sandbox_enabled": machine.kind.as_str() == "sandbox",
+                    "node_id": legacy_binding.node_id,
+                    "sandbox_enabled": legacy_binding.sandbox_enabled,
                 }))
             })
         }),
