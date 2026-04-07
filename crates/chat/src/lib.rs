@@ -1347,6 +1347,75 @@ fn active_session_payload(
     })
 }
 
+fn coordination_payload(coordination: &CoordinationState) -> Value {
+    serde_json::json!({
+        "decision": coordination.decision,
+        "currentPlan": coordination.current_plan,
+        "nextAction": coordination.next_action,
+        "routeConstraints": coordination.route_constraints,
+        "durableNotes": coordination.durable_notes,
+    })
+}
+
+fn external_activities_payload(activities: &[coordinator::ExternalActivity]) -> Vec<Value> {
+    activities
+        .iter()
+        .map(|activity| {
+            serde_json::json!({
+                "id": activity.id,
+                "source": activity.source.as_str(),
+                "title": activity.title,
+                "summary": activity.summary,
+                "link": activity.link,
+                "attachedAt": activity.attached_at,
+                "importedSessionKey": activity.imported_session_key,
+                "importedMessageCount": activity.imported_message_count,
+            })
+        })
+        .collect()
+}
+
+fn external_activity_summary_payload(activities: &[coordinator::ExternalActivity]) -> Value {
+    let source_counts = activities.iter().fold(
+        BTreeMap::<&'static str, u64>::new(),
+        |mut counts, activity| {
+            *counts.entry(activity.source.as_str()).or_default() += 1;
+            counts
+        },
+    );
+    serde_json::json!({
+        "count": activities.len(),
+        "sources": source_counts,
+    })
+}
+
+fn workspace_overview_payload(
+    session_entry: Option<&SessionEntry>,
+    workspace_label: Option<&Value>,
+    linked_project: &Value,
+    current_session: &Value,
+    execution_context: &ResolvedExecutionContext,
+    approval_mode: &str,
+    coordination: &CoordinationState,
+    recent_sessions: Vec<Value>,
+) -> Value {
+    serde_json::json!({
+        "workspaceId": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspaceLabel": workspace_label.cloned().unwrap_or(Value::Null),
+        "currentSession": current_session.clone(),
+        "linkedProject": linked_project.clone(),
+        "currentBranch": session_entry.and_then(|entry| entry.worktree_branch.as_deref()),
+        "currentExecutionRoute": execution_context.route.as_str(),
+        "machine": execution_context.machine.clone(),
+        "approvalMode": approval_mode,
+        "coordination": coordination_payload(coordination),
+        "memorySummary": coordination.durable_notes,
+        "externalActivities": external_activities_payload(&coordination.external_activities),
+        "externalActivitySummary": external_activity_summary_payload(&coordination.external_activities),
+        "recentSessions": recent_sessions,
+    })
+}
+
 fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
     match route {
         ExecutionRoute::Sandbox => "sandbox",
@@ -5044,37 +5113,18 @@ impl ChatService for LiveChatService {
         };
 
         Ok(serde_json::json!({
-            "session": session_info,
+            "session": session_info.clone(),
             "project": project_info,
-            "workspaceOverview": {
-                "workspaceId": session_entry.as_ref().and_then(|entry| entry.project_id.as_deref()),
-                "workspaceLabel": workspace_linked_project.get("label"),
-                "currentSession": session_info.clone(),
-                "linkedProject": workspace_linked_project,
-                "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
-                "currentExecutionRoute": execution_context.route.as_str(),
-                "machine": execution_context.machine.clone(),
-                "approvalMode": config.tools.exec.approval_mode,
-                "coordination": {
-                    "decision": coordination.decision,
-                    "currentPlan": coordination.current_plan,
-                    "nextAction": coordination.next_action,
-                    "routeConstraints": coordination.route_constraints,
-                    "durableNotes": coordination.durable_notes,
-                },
-                "memorySummary": coordination.durable_notes,
-                "externalActivities": coordination.external_activities.iter().map(|activity| serde_json::json!({
-                    "id": activity.id,
-                    "source": activity.source.as_str(),
-                    "title": activity.title,
-                    "summary": activity.summary,
-                    "link": activity.link,
-                    "attachedAt": activity.attached_at,
-                    "importedSessionKey": activity.imported_session_key,
-                    "importedMessageCount": activity.imported_message_count,
-                })).collect::<Vec<_>>(),
-                "recentSessions": recent_sessions,
-            },
+            "workspaceOverview": workspace_overview_payload(
+                session_entry.as_ref(),
+                workspace_linked_project.get("label"),
+                &workspace_linked_project,
+                &session_info,
+                &execution_context,
+                &config.tools.exec.approval_mode,
+                &coordination,
+                recent_sessions,
+            ),
             "tools": tools,
             "skills": skills_list,
             "mcpServers": mcp_servers,
@@ -9852,6 +9902,129 @@ mod tests {
 
         assert_eq!(payload["workspaceLabel"], Value::Null);
         assert_eq!(payload["externalAgentSource"], "native");
+    }
+
+    #[test]
+    fn external_activity_summary_payload_counts_sources() {
+        let activities = vec![
+            coordinator::ExternalActivity {
+                id: "a1".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: Some("Review".to_string()),
+                summary: "Checked the branch".to_string(),
+                link: None,
+                attached_at: 1,
+                imported_session_key: None,
+                imported_message_count: Some(5),
+            },
+            coordinator::ExternalActivity {
+                id: "a2".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: None,
+                summary: "Captured notes".to_string(),
+                link: None,
+                attached_at: 2,
+                imported_session_key: None,
+                imported_message_count: None,
+            },
+            coordinator::ExternalActivity {
+                id: "a3".to_string(),
+                source: ExternalAgentSource::ClaudeCode,
+                title: None,
+                summary: "Validation".to_string(),
+                link: None,
+                attached_at: 3,
+                imported_session_key: Some("session:123".to_string()),
+                imported_message_count: Some(3),
+            },
+        ];
+
+        let summary = external_activity_summary_payload(&activities);
+        assert_eq!(summary["count"], 3);
+        assert_eq!(summary["sources"]["codex"], 2);
+        assert_eq!(summary["sources"]["claude_code"], 1);
+    }
+
+    #[test]
+    fn workspace_overview_payload_uses_normalized_current_session_and_coordination() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.project_id = Some("workspace-1".to_string());
+        entry.worktree_branch = Some("feat/test".to_string());
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Node,
+            machine: serde_json::json!({
+                "id": "node:builder",
+                "kind": "node",
+                "label": "Build box",
+                "executionRoute": "node",
+                "available": true,
+            }),
+        };
+        let current_session = serde_json::json!({
+            "key": "main",
+            "workspace": "workspace-1",
+            "workspaceLabel": "Workspace One",
+            "executionRoute": "node",
+            "externalAgentSource": "codex",
+            "machine": {
+                "id": "node:builder",
+                "label": "Build box",
+            },
+        });
+        let coordination = CoordinationState {
+            decision: Some("Use the build node".to_string()),
+            current_plan: Some("Run validation remotely".to_string()),
+            next_action: Some("Ship the patch".to_string()),
+            route_constraints: Some("Keep commands off the local host".to_string()),
+            durable_notes: Some("Remote-first workflow".to_string()),
+            external_activities: vec![coordinator::ExternalActivity {
+                id: "a1".to_string(),
+                source: ExternalAgentSource::Codex,
+                title: Some("Patch".to_string()),
+                summary: "Updated runtime payloads".to_string(),
+                link: None,
+                attached_at: 7,
+                imported_session_key: Some("session:abc".to_string()),
+                imported_message_count: Some(9),
+            }],
+        };
+        let recent_sessions = vec![serde_json::json!({
+            "key": "recent-1",
+            "executionRoute": "node",
+            "externalAgentSource": "codex",
+        })];
+
+        let payload = workspace_overview_payload(
+            Some(&entry),
+            Some(&Value::String("Workspace One".to_string())),
+            &serde_json::json!({
+                "id": "workspace-1",
+                "label": "Workspace One",
+            }),
+            &current_session,
+            &execution_context,
+            "smart",
+            &coordination,
+            recent_sessions,
+        );
+
+        assert_eq!(payload["workspaceId"], "workspace-1");
+        assert_eq!(payload["workspaceLabel"], "Workspace One");
+        assert_eq!(payload["currentSession"]["executionRoute"], "node");
+        assert_eq!(payload["currentSession"]["externalAgentSource"], "codex");
+        assert_eq!(payload["currentBranch"], "feat/test");
+        assert_eq!(payload["currentExecutionRoute"], "node");
+        assert_eq!(payload["machine"]["id"], "node:builder");
+        assert_eq!(payload["approvalMode"], "smart");
+        assert_eq!(payload["coordination"]["decision"], "Use the build node");
+        assert_eq!(payload["memorySummary"], "Remote-first workflow");
+        assert_eq!(payload["externalActivitySummary"]["count"], 1);
+        assert_eq!(payload["externalActivitySummary"]["sources"]["codex"], 1);
+        assert_eq!(
+            payload["externalActivities"][0]["importedSessionKey"],
+            "session:abc"
+        );
+        assert_eq!(payload["recentSessions"][0]["key"], "recent-1");
     }
 
     #[tokio::test]
