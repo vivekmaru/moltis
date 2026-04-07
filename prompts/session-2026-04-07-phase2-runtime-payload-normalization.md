@@ -15,10 +15,15 @@ payloads carry concrete node identity instead of a generic placeholder state.
 - Chat-side machine payloads now also carry:
   - `platform` for every execution route
   - `telemetryStale` for node-backed sessions, matching connected-node state
+- `chat.context()` active-session serialization now goes through a shared helper:
+  - reuses the normalized route / machine / external-agent fields
+  - adds `workspaceLabel` to the active session payload
+  - keeps active session and recent-session payloads closer to the same shape
 - Added focused `moltis-chat` tests covering:
   - connected node display-name propagation
   - stale connected node degradation
   - normalized recent-session machine state for connected vs missing nodes
+  - active session payload normalization and workspace-label behavior
 
 ## Validation
 
@@ -29,3 +34,5 @@ payloads carry concrete node identity instead of a generic placeholder state.
 - `cargo test -p moltis-chat recent_session_summary_payload_uses_normalized_machine_state`
 - `cargo test -p moltis-chat recent_session_summary_payload_marks_missing_node_unavailable`
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
+- `cargo test -p moltis-chat active_session_payload_uses_normalized_runtime_fields`
+- `cargo test -p moltis-chat active_session_payload_defaults_workspace_label_to_null`

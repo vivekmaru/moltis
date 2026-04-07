@@ -1318,6 +1318,35 @@ fn recent_session_summary_payload(
     })
 }
 
+fn active_session_payload(
+    session_key: &str,
+    message_count: u32,
+    session_entry: Option<&SessionEntry>,
+    execution_context: &ResolvedExecutionContext,
+    channel_context: &ChannelRuntimeContext,
+    workspace_label: Option<&Value>,
+    provider_name: Option<&str>,
+) -> Value {
+    let external_agent_source = normalize_external_agent_source(
+        session_entry.and_then(|entry| entry.external_agent_source),
+    );
+    serde_json::json!({
+        "key": session_key,
+        "messageCount": message_count,
+        "model": session_entry.and_then(|entry| entry.model.as_deref()),
+        "provider": provider_name,
+        "label": session_entry.and_then(|entry| entry.label.as_deref()),
+        "projectId": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspace": session_entry.and_then(|entry| entry.project_id.as_deref()),
+        "workspaceLabel": workspace_label.cloned().unwrap_or(Value::Null),
+        "surface": channel_context.surface.as_deref(),
+        "sessionKind": channel_context.session_kind.as_deref(),
+        "executionRoute": execution_context.route.as_str(),
+        "machine": execution_context.machine.clone(),
+        "externalAgentSource": external_agent_source.as_str(),
+    })
+}
+
 fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
     match route {
         ExecutionRoute::Sandbox => "sandbox",
@@ -4821,25 +4850,6 @@ impl ChatService for LiveChatService {
         )
         .await;
         let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
-        let external_agent_source = normalize_external_agent_source(
-            session_entry
-                .as_ref()
-                .and_then(|entry| entry.external_agent_source),
-        );
-        let session_info = serde_json::json!({
-            "key": session_key,
-            "messageCount": message_count,
-            "model": session_entry.as_ref().and_then(|e| e.model.as_deref()),
-            "provider": provider_name,
-            "label": session_entry.as_ref().and_then(|e| e.label.as_deref()),
-            "projectId": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
-            "workspace": session_entry.as_ref().and_then(|e| e.project_id.as_deref()),
-            "surface": surface_ctx.surface,
-            "sessionKind": surface_ctx.session_kind,
-            "executionRoute": execution_context.route.as_str(),
-            "machine": execution_context.machine,
-            "externalAgentSource": external_agent_source.as_str(),
-        });
 
         // Project info & context files
         let conn_id = params
@@ -4920,6 +4930,15 @@ impl ChatService for LiveChatService {
             Vec::new()
         };
         let workspace_linked_project = project_info.clone();
+        let session_info = active_session_payload(
+            &session_key,
+            message_count,
+            session_entry.as_ref(),
+            &execution_context,
+            &surface_ctx,
+            workspace_linked_project.get("label"),
+            provider_name.as_deref(),
+        );
 
         // Tools (only include if the provider supports tool calling)
         let mcp_disabled = session_entry
@@ -9759,6 +9778,79 @@ mod tests {
         assert_eq!(summary["executionRoute"], "ssh");
         assert_eq!(summary["machine"]["id"], "ssh:target:42");
         assert_eq!(summary["externalAgentSource"], "claude_code");
+    }
+
+    #[test]
+    fn active_session_payload_uses_normalized_runtime_fields() {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "main".to_string();
+        entry.label = Some("Main".to_string());
+        entry.project_id = Some("proj-1".to_string());
+        entry.external_agent_source = Some(ExternalAgentSource::Codex);
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Node,
+            machine: serde_json::json!({
+                "id": "node:builder",
+                "executionRoute": "node",
+                "kind": "node",
+                "label": "Build box",
+                "available": true,
+            }),
+        };
+        let channel_context = ChannelRuntimeContext {
+            surface: Some("web".to_string()),
+            session_kind: Some("web".to_string()),
+            ..Default::default()
+        };
+
+        let payload = active_session_payload(
+            "main",
+            7,
+            Some(&entry),
+            &execution_context,
+            &channel_context,
+            Some(&Value::String("Workspace One".to_string())),
+            Some("openai"),
+        );
+
+        assert_eq!(payload["key"], "main");
+        assert_eq!(payload["messageCount"], 7);
+        assert_eq!(payload["workspace"], "proj-1");
+        assert_eq!(payload["workspaceLabel"], "Workspace One");
+        assert_eq!(payload["surface"], "web");
+        assert_eq!(payload["sessionKind"], "web");
+        assert_eq!(payload["executionRoute"], "node");
+        assert_eq!(payload["machine"]["label"], "Build box");
+        assert_eq!(payload["externalAgentSource"], "codex");
+        assert_eq!(payload["provider"], "openai");
+    }
+
+    #[test]
+    fn active_session_payload_defaults_workspace_label_to_null() {
+        let entry = make_session_entry_with_binding(None);
+        let execution_context = ResolvedExecutionContext {
+            route: ExecutionRoute::Local,
+            machine: serde_json::json!({
+                "id": "local",
+                "executionRoute": "local",
+                "kind": "local",
+                "label": "Local host",
+                "available": true,
+            }),
+        };
+
+        let payload = active_session_payload(
+            "main",
+            0,
+            Some(&entry),
+            &execution_context,
+            &ChannelRuntimeContext::default(),
+            None,
+            None,
+        );
+
+        assert_eq!(payload["workspaceLabel"], Value::Null);
+        assert_eq!(payload["externalAgentSource"], "native");
     }
 
     #[tokio::test]
