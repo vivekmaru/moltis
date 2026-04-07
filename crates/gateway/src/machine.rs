@@ -1,7 +1,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use {
-    moltis_sessions::metadata::SessionEntry, moltis_tools::sandbox::SandboxRouter, serde::Serialize,
+    moltis_sessions::metadata::SessionEntry,
+    moltis_tools::sandbox::SandboxRouter,
+    serde::Serialize,
+    serde_json::{Map, Value},
 };
 
 use crate::{
@@ -321,6 +324,32 @@ pub fn legacy_session_binding(machine: &MachineDescriptor) -> LegacySessionBindi
         },
         sandbox_enabled: machine.kind == MachineKind::Sandbox,
     }
+}
+
+#[must_use]
+pub fn session_contract_fields(machine: &MachineDescriptor) -> Map<String, Value> {
+    let legacy_binding = legacy_session_binding(machine);
+    Map::from_iter([
+        (
+            "sandbox_enabled".to_string(),
+            Value::Bool(legacy_binding.sandbox_enabled),
+        ),
+        (
+            "node_id".to_string(),
+            legacy_binding
+                .node_id
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "executionRoute".to_string(),
+            Value::String(machine.execution_route.to_string()),
+        ),
+        (
+            "machine".to_string(),
+            serde_json::to_value(machine).unwrap_or(Value::Null),
+        ),
+    ])
 }
 
 #[must_use]
@@ -664,6 +693,24 @@ mod tests {
         ));
         assert_eq!(ssh.node_id.as_deref(), Some("ssh:target:42"));
         assert!(!ssh.sandbox_enabled);
+    }
+
+    #[test]
+    fn session_contract_fields_use_machine_contract() {
+        let contract = session_contract_fields(&MachineDescriptor::sandbox(false));
+        assert_eq!(contract.get("sandbox_enabled"), Some(&Value::Bool(true)));
+        assert_eq!(contract.get("node_id"), Some(&Value::Null));
+        assert_eq!(
+            contract.get("executionRoute"),
+            Some(&Value::String("sandbox".to_string()))
+        );
+        assert_eq!(
+            contract
+                .get("machine")
+                .and_then(|value| value.get("available"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]

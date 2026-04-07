@@ -328,15 +328,16 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 )
                 .await;
 
-                let legacy_binding = crate::machine::legacy_session_binding(&machine);
+                let mut payload = serde_json::Map::from_iter([
+                    ("ok".to_string(), serde_json::Value::Bool(true)),
+                    (
+                        "machineId".to_string(),
+                        serde_json::Value::String(machine.id.clone()),
+                    ),
+                ]);
+                payload.extend(crate::machine::session_contract_fields(&machine));
 
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "machine": machine,
-                    "machineId": machine.id,
-                    "node_id": legacy_binding.node_id,
-                    "sandbox_enabled": legacy_binding.sandbox_enabled,
-                }))
+                Ok(serde_json::Value::Object(payload))
             })
         }),
     );

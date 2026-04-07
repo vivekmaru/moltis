@@ -2658,55 +2658,124 @@ async fn present_session_event_entry(
     let machine_descriptor =
         moltis_gateway::machine::live_session_machine_descriptor(state, entry, sandbox_active)
             .await;
-    let legacy_binding = moltis_gateway::machine::legacy_session_binding(&machine_descriptor);
-    let execution_route = machine_descriptor.execution_route;
-    let machine = serde_json::to_value(&machine_descriptor).unwrap_or_else(|_| {
-        serde_json::json!({
-            "id": "local",
-            "kind": "local",
-            "route": "local",
-            "executionRoute": "local",
-            "label": "Local host",
-            "nodeId": serde_json::Value::Null,
-            "trustState": "trusted_local",
-            "health": "ready",
-            "available": true,
-        })
-    });
     let agent_id = entry.agent_id.clone();
 
-    serde_json::json!({
-        "id": entry.id,
-        "key": entry.key,
-        "label": entry.label,
-        "model": entry.model,
-        "createdAt": entry.created_at,
-        "updatedAt": entry.updated_at,
-        "messageCount": entry.message_count,
-        "lastSeenMessageCount": entry.last_seen_message_count,
-        "projectId": entry.project_id,
-        "workspace": entry.project_id,
-        "workspaceLabel": workspace_label,
-        "sandbox_enabled": legacy_binding.sandbox_enabled,
-        "sandbox_image": entry.sandbox_image,
-        "worktree_branch": entry.worktree_branch,
-        "channelBinding": entry.channel_binding,
-        "activeChannel": active_channel,
-        "parentSessionKey": entry.parent_session_key,
-        "forkPoint": entry.fork_point,
-        "mcpDisabled": entry.mcp_disabled,
-        "preview": preview,
-        "archived": entry.archived,
-        "agent_id": agent_id.clone(),
-        "agentId": agent_id,
-        "node_id": legacy_binding.node_id,
-        "surface": surface,
-        "sessionKind": session_kind,
-        "executionRoute": execution_route,
-        "machine": machine,
-        "externalAgentSource": entry.external_agent_source.unwrap_or_default().as_str(),
-        "version": entry.version,
-    })
+    let mut payload = serde_json::Map::from_iter([
+        (
+            "id".to_string(),
+            serde_json::to_value(&entry.id).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "key".to_string(),
+            serde_json::to_value(&entry.key).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "label".to_string(),
+            serde_json::to_value(&entry.label).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "model".to_string(),
+            serde_json::to_value(&entry.model).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "createdAt".to_string(),
+            serde_json::Value::from(entry.created_at),
+        ),
+        (
+            "updatedAt".to_string(),
+            serde_json::Value::from(entry.updated_at),
+        ),
+        (
+            "messageCount".to_string(),
+            serde_json::Value::from(entry.message_count),
+        ),
+        (
+            "lastSeenMessageCount".to_string(),
+            serde_json::Value::from(entry.last_seen_message_count),
+        ),
+        (
+            "projectId".to_string(),
+            serde_json::to_value(&entry.project_id).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "workspace".to_string(),
+            serde_json::to_value(&entry.project_id).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "workspaceLabel".to_string(),
+            serde_json::to_value(workspace_label).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "sandbox_image".to_string(),
+            serde_json::to_value(&entry.sandbox_image).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "worktree_branch".to_string(),
+            serde_json::to_value(&entry.worktree_branch).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "channelBinding".to_string(),
+            serde_json::to_value(&entry.channel_binding).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "activeChannel".to_string(),
+            serde_json::Value::Bool(active_channel),
+        ),
+        (
+            "parentSessionKey".to_string(),
+            serde_json::to_value(&entry.parent_session_key).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "forkPoint".to_string(),
+            serde_json::to_value(&entry.fork_point).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "mcpDisabled".to_string(),
+            serde_json::to_value(&entry.mcp_disabled).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "preview".to_string(),
+            serde_json::to_value(preview).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "archived".to_string(),
+            serde_json::Value::Bool(entry.archived),
+        ),
+        (
+            "agent_id".to_string(),
+            serde_json::to_value(agent_id.clone()).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "agentId".to_string(),
+            serde_json::to_value(agent_id).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "surface".to_string(),
+            serde_json::Value::String(surface.to_string()),
+        ),
+        (
+            "sessionKind".to_string(),
+            serde_json::Value::String(session_kind.to_string()),
+        ),
+        (
+            "externalAgentSource".to_string(),
+            serde_json::Value::String(
+                entry
+                    .external_agent_source
+                    .unwrap_or_default()
+                    .as_str()
+                    .to_string(),
+            ),
+        ),
+        (
+            "version".to_string(),
+            serde_json::Value::from(entry.version),
+        ),
+    ]);
+    payload.extend(moltis_gateway::machine::session_contract_fields(
+        &machine_descriptor,
+    ));
+    serde_json::Value::Object(payload)
 }
 
 /// Check whether a WebSocket `Origin` header matches the request `Host`.

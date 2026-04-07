@@ -1278,40 +1278,97 @@ impl LiveSessionService {
         let machine = self
             .machine_descriptor_with_inventory(execution_route, entry, inventory)
             .await;
-        let legacy_binding = crate::machine::legacy_session_binding(&machine);
+        let mut payload = serde_json::Map::from_iter([
+            (
+                "id".to_string(),
+                serde_json::to_value(&entry.id).unwrap_or(Value::Null),
+            ),
+            (
+                "key".to_string(),
+                serde_json::to_value(&entry.key).unwrap_or(Value::Null),
+            ),
+            (
+                "label".to_string(),
+                serde_json::to_value(&entry.label).unwrap_or(Value::Null),
+            ),
+            (
+                "model".to_string(),
+                serde_json::to_value(&entry.model).unwrap_or(Value::Null),
+            ),
+            ("createdAt".to_string(), Value::from(entry.created_at)),
+            ("updatedAt".to_string(), Value::from(entry.updated_at)),
+            ("messageCount".to_string(), Value::from(entry.message_count)),
+            (
+                "lastSeenMessageCount".to_string(),
+                Value::from(entry.last_seen_message_count),
+            ),
+            (
+                "projectId".to_string(),
+                serde_json::to_value(&entry.project_id).unwrap_or(Value::Null),
+            ),
+            (
+                "workspace".to_string(),
+                serde_json::to_value(&entry.project_id).unwrap_or(Value::Null),
+            ),
+            (
+                "workspaceLabel".to_string(),
+                serde_json::to_value(workspace_label).unwrap_or(Value::Null),
+            ),
+            (
+                "sandbox_image".to_string(),
+                serde_json::to_value(&entry.sandbox_image).unwrap_or(Value::Null),
+            ),
+            (
+                "worktree_branch".to_string(),
+                serde_json::to_value(&entry.worktree_branch).unwrap_or(Value::Null),
+            ),
+            (
+                "channelBinding".to_string(),
+                serde_json::to_value(&entry.channel_binding).unwrap_or(Value::Null),
+            ),
+            ("activeChannel".to_string(), Value::Bool(active_channel)),
+            (
+                "parentSessionKey".to_string(),
+                serde_json::to_value(&entry.parent_session_key).unwrap_or(Value::Null),
+            ),
+            (
+                "forkPoint".to_string(),
+                serde_json::to_value(&entry.fork_point).unwrap_or(Value::Null),
+            ),
+            (
+                "mcpDisabled".to_string(),
+                serde_json::to_value(&entry.mcp_disabled).unwrap_or(Value::Null),
+            ),
+            (
+                "preview".to_string(),
+                serde_json::to_value(preview).unwrap_or(Value::Null),
+            ),
+            ("archived".to_string(), Value::Bool(entry.archived)),
+            (
+                "agent_id".to_string(),
+                serde_json::to_value(agent_id.clone()).unwrap_or(Value::Null),
+            ),
+            (
+                "agentId".to_string(),
+                serde_json::to_value(agent_id).unwrap_or(Value::Null),
+            ),
+            (
+                "surface".to_string(),
+                Value::String(surface.surface.to_string()),
+            ),
+            (
+                "sessionKind".to_string(),
+                Value::String(surface.session_kind.as_str().to_string()),
+            ),
+            (
+                "externalAgentSource".to_string(),
+                Value::String(external_source.as_str().to_string()),
+            ),
+            ("version".to_string(), Value::from(entry.version)),
+        ]);
+        payload.extend(crate::machine::session_contract_fields(&machine));
 
-        serde_json::json!({
-            "id": entry.id,
-            "key": entry.key,
-            "label": entry.label,
-            "model": entry.model,
-            "createdAt": entry.created_at,
-            "updatedAt": entry.updated_at,
-            "messageCount": entry.message_count,
-            "lastSeenMessageCount": entry.last_seen_message_count,
-            "projectId": entry.project_id,
-            "workspace": entry.project_id,
-            "workspaceLabel": workspace_label,
-            "sandbox_enabled": legacy_binding.sandbox_enabled,
-            "sandbox_image": entry.sandbox_image,
-            "worktree_branch": entry.worktree_branch,
-            "channelBinding": entry.channel_binding,
-            "activeChannel": active_channel,
-            "parentSessionKey": entry.parent_session_key,
-            "forkPoint": entry.fork_point,
-            "mcpDisabled": entry.mcp_disabled,
-            "preview": preview,
-            "archived": entry.archived,
-            "agent_id": agent_id.clone(),
-            "agentId": agent_id,
-            "node_id": legacy_binding.node_id,
-            "surface": surface.surface,
-            "sessionKind": surface.session_kind.as_str(),
-            "executionRoute": execution_route.as_str(),
-            "machine": serde_json::to_value(machine).unwrap_or(Value::Null),
-            "externalAgentSource": external_source.as_str(),
-            "version": entry.version,
-        })
+        Value::Object(payload)
     }
 
     async fn workspace_overview_for_entry(&self, entry: &SessionEntry) -> Value {
