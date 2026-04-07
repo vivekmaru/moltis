@@ -1173,6 +1173,17 @@ impl LiveSessionService {
             .await;
     }
 
+    fn inherited_machine_binding<'a>(
+        parent: &'a SessionEntry,
+        parent_machine_id: &'a str,
+    ) -> Option<&'a str> {
+        if parent.node_id.is_some() || parent.sandbox_enabled.is_some() {
+            Some(parent_machine_id)
+        } else {
+            None
+        }
+    }
+
     fn preferred_machine_payload(machine_id: Option<&str>, sandbox_available: bool) -> Value {
         let Some(machine_id) = machine_id else {
             return Value::Null;
@@ -1278,40 +1289,97 @@ impl LiveSessionService {
         let machine = self
             .machine_descriptor_with_inventory(execution_route, entry, inventory)
             .await;
-        let legacy_binding = crate::machine::legacy_session_binding(&machine);
+        let mut payload = serde_json::Map::from_iter([
+            (
+                "id".to_string(),
+                serde_json::to_value(&entry.id).unwrap_or(Value::Null),
+            ),
+            (
+                "key".to_string(),
+                serde_json::to_value(&entry.key).unwrap_or(Value::Null),
+            ),
+            (
+                "label".to_string(),
+                serde_json::to_value(&entry.label).unwrap_or(Value::Null),
+            ),
+            (
+                "model".to_string(),
+                serde_json::to_value(&entry.model).unwrap_or(Value::Null),
+            ),
+            ("createdAt".to_string(), Value::from(entry.created_at)),
+            ("updatedAt".to_string(), Value::from(entry.updated_at)),
+            ("messageCount".to_string(), Value::from(entry.message_count)),
+            (
+                "lastSeenMessageCount".to_string(),
+                Value::from(entry.last_seen_message_count),
+            ),
+            (
+                "projectId".to_string(),
+                serde_json::to_value(&entry.project_id).unwrap_or(Value::Null),
+            ),
+            (
+                "workspace".to_string(),
+                serde_json::to_value(&entry.project_id).unwrap_or(Value::Null),
+            ),
+            (
+                "workspaceLabel".to_string(),
+                serde_json::to_value(workspace_label).unwrap_or(Value::Null),
+            ),
+            (
+                "sandbox_image".to_string(),
+                serde_json::to_value(&entry.sandbox_image).unwrap_or(Value::Null),
+            ),
+            (
+                "worktree_branch".to_string(),
+                serde_json::to_value(&entry.worktree_branch).unwrap_or(Value::Null),
+            ),
+            (
+                "channelBinding".to_string(),
+                serde_json::to_value(&entry.channel_binding).unwrap_or(Value::Null),
+            ),
+            ("activeChannel".to_string(), Value::Bool(active_channel)),
+            (
+                "parentSessionKey".to_string(),
+                serde_json::to_value(&entry.parent_session_key).unwrap_or(Value::Null),
+            ),
+            (
+                "forkPoint".to_string(),
+                serde_json::to_value(&entry.fork_point).unwrap_or(Value::Null),
+            ),
+            (
+                "mcpDisabled".to_string(),
+                serde_json::to_value(&entry.mcp_disabled).unwrap_or(Value::Null),
+            ),
+            (
+                "preview".to_string(),
+                serde_json::to_value(preview).unwrap_or(Value::Null),
+            ),
+            ("archived".to_string(), Value::Bool(entry.archived)),
+            (
+                "agent_id".to_string(),
+                serde_json::to_value(agent_id.clone()).unwrap_or(Value::Null),
+            ),
+            (
+                "agentId".to_string(),
+                serde_json::to_value(agent_id).unwrap_or(Value::Null),
+            ),
+            (
+                "surface".to_string(),
+                Value::String(surface.surface.to_string()),
+            ),
+            (
+                "sessionKind".to_string(),
+                Value::String(surface.session_kind.as_str().to_string()),
+            ),
+            (
+                "externalAgentSource".to_string(),
+                Value::String(external_source.as_str().to_string()),
+            ),
+            ("version".to_string(), Value::from(entry.version)),
+        ]);
+        payload.extend(crate::machine::session_contract_fields(&machine));
 
-        serde_json::json!({
-            "id": entry.id,
-            "key": entry.key,
-            "label": entry.label,
-            "model": entry.model,
-            "createdAt": entry.created_at,
-            "updatedAt": entry.updated_at,
-            "messageCount": entry.message_count,
-            "lastSeenMessageCount": entry.last_seen_message_count,
-            "projectId": entry.project_id,
-            "workspace": entry.project_id,
-            "workspaceLabel": workspace_label,
-            "sandbox_enabled": legacy_binding.sandbox_enabled,
-            "sandbox_image": entry.sandbox_image,
-            "worktree_branch": entry.worktree_branch,
-            "channelBinding": entry.channel_binding,
-            "activeChannel": active_channel,
-            "parentSessionKey": entry.parent_session_key,
-            "forkPoint": entry.fork_point,
-            "mcpDisabled": entry.mcp_disabled,
-            "preview": preview,
-            "archived": entry.archived,
-            "agent_id": agent_id.clone(),
-            "agentId": agent_id,
-            "node_id": legacy_binding.node_id,
-            "surface": surface.surface,
-            "sessionKind": surface.session_kind.as_str(),
-            "executionRoute": execution_route.as_str(),
-            "machine": serde_json::to_value(machine).unwrap_or(Value::Null),
-            "externalAgentSource": external_source.as_str(),
-            "version": entry.version,
-        })
+        Value::Object(payload)
     }
 
     async fn workspace_overview_for_entry(&self, entry: &SessionEntry) -> Value {
@@ -1607,6 +1675,10 @@ impl SessionService for LiveSessionService {
                 self.apply_project_machine_binding(key, project_binding.as_deref())
                     .await;
             }
+        }
+        if let Some(machine_id_opt) = p.machine_id {
+            let machine_id = machine_id_opt.filter(|machine_id| !machine_id.trim().is_empty());
+            self.apply_machine_binding(key, machine_id.as_deref()).await;
         }
         if let Some(worktree_branch_opt) = p.worktree_branch {
             let worktree_branch = worktree_branch_opt.filter(|s| !s.is_empty());
@@ -2245,12 +2317,18 @@ impl SessionService for LiveSessionService {
         // Inherit model, project, mcp_disabled, and agent_id from parent.
         if let Some(parent) = self.metadata.get(parent_key).await {
             let parent_agent = self.resolve_agent_id_for_entry(&parent, false).await;
+            let parent_route = self.effective_execution_route(&parent).await;
+            let parent_machine = self
+                .machine_descriptor_with_inventory(parent_route, &parent, None)
+                .await;
+            let inherited_machine_id =
+                Self::inherited_machine_binding(&parent, &parent_machine.id).map(str::to_owned);
             if parent.model.is_some() {
                 self.metadata.set_model(&new_key, parent.model).await;
             }
             if parent.project_id.is_some() {
                 self.metadata
-                    .set_project_id(&new_key, parent.project_id)
+                    .set_project_id(&new_key, parent.project_id.clone())
                     .await;
             }
             if parent.mcp_disabled.is_some() {
@@ -2262,11 +2340,8 @@ impl SessionService for LiveSessionService {
                 .metadata
                 .set_agent_id(&new_key, Some(&parent_agent))
                 .await;
-            if parent.node_id.is_some() {
-                let _ = self
-                    .metadata
-                    .set_node_id(&new_key, parent.node_id.as_deref())
-                    .await;
+            if let Some(machine_id) = inherited_machine_id.as_deref() {
+                self.apply_machine_binding(&new_key, Some(machine_id)).await;
             }
             if parent.external_agent_source.is_some() {
                 let _ = self
@@ -3299,6 +3374,16 @@ mod tests {
         pool
     }
 
+    fn sandbox_router_with_mode(mode: moltis_tools::sandbox::SandboxMode) -> Arc<SandboxRouter> {
+        let config = moltis_tools::sandbox::SandboxConfig {
+            mode,
+            ..Default::default()
+        };
+        let backend: Arc<dyn moltis_tools::sandbox::Sandbox> =
+            Arc::new(moltis_tools::sandbox::DockerSandbox::new(config.clone()));
+        Arc::new(SandboxRouter::with_backend(config, backend))
+    }
+
     #[tokio::test]
     async fn with_browser_service_builder() {
         let dir = tempfile::tempdir().unwrap();
@@ -3540,6 +3625,193 @@ mod tests {
         assert_eq!(entry.project_id.as_deref(), Some("ops"));
         assert_eq!(entry.sandbox_enabled, Some(true));
         assert_eq!(entry.node_id, None);
+    }
+
+    #[tokio::test]
+    async fn patch_machine_id_updates_session_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "machineId": "node-build",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-build");
+        assert_eq!(result["node_id"], "node-build");
+        assert_eq!(result["sandbox_enabled"], false);
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn patch_machine_id_overrides_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some(crate::machine::SANDBOX_MACHINE_ID.to_string());
+        project_store.upsert(project).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "projectId": "ops",
+                "machineId": "node-build",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["workspace"], "ops");
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-build");
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.project_id.as_deref(), Some("ops"));
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_sandbox_machine_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        metadata.set_sandbox_enabled("main", Some(true)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, Some(true));
+        assert_eq!(entry.node_id, None);
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_remote_machine_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        let _ = metadata.set_node_id("main", Some("node-builder")).await;
+        metadata.set_sandbox_enabled("main", Some(false)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.node_id.as_deref(), Some("node-builder"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-builder");
+    }
+
+    #[tokio::test]
+    async fn fork_from_main_keeps_non_main_sandbox_policy_without_explicit_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let sandbox_router = sandbox_router_with_mode(moltis_tools::sandbox::SandboxMode::NonMain);
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata))
+            .with_sandbox_router(Arc::clone(&sandbox_router));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, None);
+        assert_eq!(entry.node_id, None);
+        assert!(sandbox_router.is_sandboxed(session_key).await);
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_explicit_local_override_under_non_main_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        metadata.set_sandbox_enabled("main", Some(false)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let sandbox_router = sandbox_router_with_mode(moltis_tools::sandbox::SandboxMode::NonMain);
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata))
+            .with_sandbox_router(Arc::clone(&sandbox_router));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, Some(false));
+        assert_eq!(entry.node_id, None);
+        assert!(!sandbox_router.is_sandboxed(session_key).await);
+        assert_eq!(result["executionRoute"], "local");
+        assert_eq!(result["machine"]["id"], crate::machine::LOCAL_MACHINE_ID);
     }
 
     #[tokio::test]
