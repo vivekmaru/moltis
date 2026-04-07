@@ -8,6 +8,45 @@ export function resolveSessionExecutionRoute(entry) {
 	return entry?.sandbox_enabled === true ? "sandbox" : "local";
 }
 
+function legacyMachineKind(route) {
+	switch (route) {
+		case "sandbox":
+			return "sandbox";
+		case "ssh":
+			return "ssh";
+		case "node":
+			return "node";
+		default:
+			return "local";
+	}
+}
+
+function legacyMachineLabel(route, machineId) {
+	switch (route) {
+		case "sandbox":
+			return "Sandbox";
+		case "ssh":
+			return machineId || "SSH target";
+		case "node":
+			return machineId || "Paired node";
+		default:
+			return "Local host";
+	}
+}
+
+function legacyMachineTrustState(route) {
+	switch (route) {
+		case "sandbox":
+			return "sandboxed";
+		case "ssh":
+			return "managed_ssh";
+		case "node":
+			return "paired_node";
+		default:
+			return "trusted_local";
+	}
+}
+
 export function resolveSessionMachineId(entry, route = resolveSessionExecutionRoute(entry)) {
 	if (entry?.machine?.id) return entry.machine.id;
 	if (route === "sandbox") return "sandbox";
@@ -17,8 +56,9 @@ export function resolveSessionMachineId(entry, route = resolveSessionExecutionRo
 }
 
 export function resolveSessionNodeId(entry, route = resolveSessionExecutionRoute(entry)) {
-	if ((route === "ssh" || route === "node") && entry?.machine?.id) {
-		return entry.machine.id;
+	if (route === "ssh" || route === "node") {
+		if (entry?.machine?.nodeId) return entry.machine.nodeId;
+		if (entry?.machine?.id) return entry.machine.id;
 	}
 	if (entry?.node_id) return entry.node_id;
 	return null;
@@ -28,9 +68,27 @@ export function resolveSessionSandboxEnabled(entry, route = resolveSessionExecut
 	return route === "sandbox";
 }
 
+export function normalizeSessionMachine(entry, fallbackMachine = null) {
+	var route = resolveSessionExecutionRoute(entry);
+	var machine = entry?.machine || fallbackMachine || null;
+	if (machine?.id) return machine;
+	var machineId = resolveSessionMachineId(entry, route);
+	return {
+		id: machineId,
+		kind: legacyMachineKind(route),
+		route,
+		executionRoute: route,
+		label: legacyMachineLabel(route, machineId),
+		trustState: legacyMachineTrustState(route),
+		health: machineId ? "ready" : "unavailable",
+		available: route === "local" || route === "sandbox" ? true : Boolean(machineId),
+		nodeId: resolveSessionNodeId(entry, route),
+	};
+}
+
 export function applySessionMachinePayload(target, payload, fallbackMachine = null) {
 	if (!target) return;
-	var machine = payload?.machine || fallbackMachine || target.machine || null;
+	var machine = normalizeSessionMachine(payload || target, fallbackMachine || target.machine || null);
 	var normalized = {
 		...(payload || {}),
 		machine,

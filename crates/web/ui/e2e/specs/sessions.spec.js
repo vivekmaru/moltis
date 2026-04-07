@@ -208,6 +208,108 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("bootstrap hydration synthesizes normalized machine payload from legacy fields", async ({ page }) => {
+		const seededSession = {
+			id: "sess-bootstrap-legacy",
+			key: "bootstrap:legacy-node",
+			label: "Bootstrap Legacy Node",
+			model: "",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+			messageCount: 0,
+			lastSeenMessageCount: 0,
+			projectId: "workspace-bootstrap",
+			workspace: "workspace-bootstrap",
+			sandbox_enabled: false,
+			sandbox_image: null,
+			worktree_branch: "",
+			channelBinding: null,
+			activeChannel: false,
+			parentSessionKey: null,
+			forkPoint: null,
+			mcpDisabled: false,
+			preview: "",
+			archived: false,
+			agent_id: "main",
+			agentId: "main",
+			node_id: "node:legacy",
+			surface: "web",
+			sessionKind: "web",
+			externalAgentSource: "native",
+			version: 8,
+		};
+
+		await page.addInitScript((seedSession) => {
+			Object.defineProperty(window, "__MOLTIS__", {
+				configurable: true,
+				set(value) {
+					var next = value || {};
+					next.sessions_recent = [seedSession];
+					Object.defineProperty(window, "__MOLTIS__", {
+						value: next,
+						writable: true,
+						configurable: true,
+					});
+				},
+				get() {
+					return undefined;
+				},
+			});
+		}, seededSession);
+
+		await page.route("**/api/bootstrap?include_sessions=false", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					channels: null,
+					models: [],
+					projects: [],
+					sandbox: null,
+					counts: null,
+				}),
+			});
+		});
+		await page.route("**/api/sessions*", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify([seededSession]),
+			});
+		});
+
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await expect
+			.poll(() =>
+				page.evaluate(() => {
+					const session = window.__moltis_stores?.sessionStore?.getByKey?.("bootstrap:legacy-node");
+					if (!session) return null;
+					return {
+						executionRoute: session.executionRoute,
+						machineId: session.machine?.id || null,
+						machineKind: session.machine?.kind || null,
+						machineRoute: session.machine?.executionRoute || null,
+						nodeId: session.machine?.nodeId || null,
+						node_id: session.node_id,
+						sandbox_enabled: session.sandbox_enabled,
+					};
+				}),
+			)
+			.toEqual({
+				executionRoute: "node",
+				machineId: "node:legacy",
+				machineKind: "node",
+				machineRoute: "node",
+				nodeId: "node:legacy",
+				node_id: "node:legacy",
+				sandbox_enabled: false,
+			});
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("sessions sidebar uses search and add button row", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
