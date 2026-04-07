@@ -1416,6 +1416,17 @@ fn workspace_overview_payload(
     })
 }
 
+fn normalize_mcp_servers_payload(payload: Value) -> Vec<Value> {
+    if let Some(servers) = payload.as_array() {
+        return servers.to_vec();
+    }
+    payload
+        .get("servers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn execution_mode_for_route(route: ExecutionRoute) -> &'static str {
     match route {
         ExecutionRoute::Sandbox => "sandbox",
@@ -2728,6 +2739,34 @@ struct ActiveAssistantDraft {
     run_id: String,
 }
 
+struct PreparedPromptView {
+    system_prompt: String,
+    tool_mode: ToolMode,
+    native_tools: bool,
+    tools_enabled: bool,
+    tool_count: usize,
+}
+
+struct ContextCapabilitiesView {
+    provider_name: Option<String>,
+    supports_tools: bool,
+    context_window: u32,
+    mcp_disabled: bool,
+    tools: Vec<Value>,
+    skills: Vec<Value>,
+    mcp_servers: Vec<Value>,
+}
+
+struct PreparedChatContextView {
+    session_info: Value,
+    project_info: Value,
+    workspace_overview: Value,
+    context_capabilities: ContextCapabilitiesView,
+    sandbox_info: Value,
+    execution_info: Value,
+    token_usage: SessionTokenUsage,
+}
+
 impl ActiveAssistantDraft {
     fn new(run_id: &str, model: &str, provider: &str, seq: Option<u64>) -> Self {
         Self {
@@ -2931,6 +2970,372 @@ impl LiveChatService {
     pub fn with_hooks(mut self, registry: moltis_common::hooks::HookRegistry) -> Self {
         self.hook_registry = Some(Arc::new(registry));
         self
+    }
+
+    async fn prepare_prompt_view(
+        &self,
+        provider: &Arc<dyn moltis_agents::model::LlmProvider>,
+        session_key: &str,
+        conn_id: Option<&str>,
+        params: &Value,
+    ) -> PreparedPromptView {
+        let tool_mode = effective_tool_mode(&**provider);
+        let native_tools = matches!(tool_mode, ToolMode::Native);
+        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
+
+        let session_entry = self.session_metadata.get(session_key).await;
+        let persona = load_prompt_persona_for_session(session_entry.as_ref());
+        let mut runtime_context = build_prompt_runtime_context(
+            &self.state,
+            provider,
+            session_key,
+            session_entry.as_ref(),
+        )
+        .await;
+        apply_request_runtime_context(&mut runtime_context.host, params);
+
+        let project_context = self.resolve_project_context(session_key, conn_id).await;
+
+        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+        let discovered_skills = match discoverer.discover().await {
+            Ok(skills) => skills,
+            Err(error) => {
+                warn!("failed to discover skills: {error}");
+                Vec::new()
+            },
+        };
+
+        let mcp_disabled = session_entry
+            .as_ref()
+            .and_then(|entry| entry.mcp_disabled)
+            .unwrap_or(false);
+
+        let filtered_registry = {
+            let registry_guard = self.tool_registry.read().await;
+            if tools_enabled {
+                apply_runtime_tool_filters(
+                    &registry_guard,
+                    &persona.config,
+                    &discovered_skills,
+                    mcp_disabled,
+                )
+            } else {
+                registry_guard.clone_without(&[])
+            }
+        };
+        let tool_count = filtered_registry.list_schemas().len();
+
+        let system_prompt = if tools_enabled {
+            build_system_prompt_with_session_runtime(
+                &filtered_registry,
+                native_tools,
+                project_context.as_deref(),
+                &discovered_skills,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+                persona.memory_text.as_deref(),
+            )
+        } else {
+            build_system_prompt_minimal_runtime(
+                project_context.as_deref(),
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+                persona.memory_text.as_deref(),
+            )
+        };
+
+        PreparedPromptView {
+            system_prompt,
+            tool_mode,
+            native_tools,
+            tools_enabled,
+            tool_count,
+        }
+    }
+
+    async fn prepare_context_capabilities(
+        &self,
+        session_entry: Option<&SessionEntry>,
+    ) -> ContextCapabilitiesView {
+        let (provider_name, supports_tools, context_window) = {
+            let registry = self.providers.read().await;
+            let session_model = session_entry.and_then(|entry| entry.model.as_deref());
+            if let Some(model_id) = session_model {
+                let provider = registry.get(model_id);
+                (
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.name().to_string()),
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.supports_tools())
+                        .unwrap_or(true),
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.context_window())
+                        .unwrap_or(200_000),
+                )
+            } else {
+                let provider = registry.first();
+                (
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.name().to_string()),
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.supports_tools())
+                        .unwrap_or(true),
+                    provider
+                        .as_ref()
+                        .map(|provider| provider.context_window())
+                        .unwrap_or(200_000),
+                )
+            }
+        };
+
+        let mcp_disabled = session_entry
+            .and_then(|entry| entry.mcp_disabled)
+            .unwrap_or(false);
+        let config = moltis_config::discover_and_load();
+
+        let tools = if supports_tools {
+            let registry_guard = self.tool_registry.read().await;
+            let effective_registry =
+                apply_runtime_tool_filters(&registry_guard, &config, &[], mcp_disabled);
+            effective_registry
+                .list_schemas()
+                .iter()
+                .map(|schema| {
+                    serde_json::json!({
+                        "name": schema.get("name").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                        "description": schema.get("description").and_then(|value| value.as_str()).unwrap_or(""),
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let skills = if supports_tools {
+            let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+            let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+            match discoverer.discover().await {
+                Ok(entries) => entries
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "name": entry.name,
+                            "description": entry.description,
+                            "source": entry.source,
+                        })
+                    })
+                    .collect(),
+                Err(error) => {
+                    warn!("failed to discover skills: {error}");
+                    Vec::new()
+                },
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mcp_servers = if supports_tools {
+            normalize_mcp_servers_payload(
+                self.state
+                    .mcp_service()
+                    .list()
+                    .await
+                    .unwrap_or(serde_json::json!([])),
+            )
+        } else {
+            Vec::new()
+        };
+
+        ContextCapabilitiesView {
+            provider_name,
+            supports_tools,
+            context_window,
+            mcp_disabled,
+            tools,
+            skills,
+            mcp_servers,
+        }
+    }
+
+    async fn resolve_context_project_info(
+        &self,
+        conn_id: Option<&str>,
+        session_entry: Option<&SessionEntry>,
+    ) -> Value {
+        let project_id = if let Some(conn_id) = conn_id {
+            self.state.active_project_id(conn_id).await
+        } else {
+            None
+        };
+        let project_id =
+            project_id.or_else(|| session_entry.and_then(|entry| entry.project_id.clone()));
+
+        let Some(project_id) = project_id else {
+            return serde_json::json!(null);
+        };
+
+        match self
+            .state
+            .project_service()
+            .get(serde_json::json!({ "id": project_id }))
+            .await
+        {
+            Ok(value) => {
+                let dir = value.get("directory").and_then(|field| field.as_str());
+                let context_files = if let Some(dir) = dir {
+                    match moltis_projects::context::load_context_files(Path::new(dir)) {
+                        Ok(files) => files
+                            .iter()
+                            .map(|file| {
+                                serde_json::json!({
+                                    "path": file.path.display().to_string(),
+                                    "size": file.content.len(),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        Err(_) => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
+                serde_json::json!({
+                    "id": value.get("id"),
+                    "label": value.get("label"),
+                    "directory": dir,
+                    "systemPrompt": value.get("system_prompt").or(value.get("systemPrompt")),
+                    "contextFiles": context_files,
+                })
+            },
+            Err(_) => serde_json::json!(null),
+        }
+    }
+
+    async fn recent_workspace_sessions(
+        &self,
+        project_id: Option<&str>,
+        connected_nodes: &[runtime::ConnectedNodeSummary],
+    ) -> Vec<Value> {
+        let Some(project_id) = project_id else {
+            return Vec::new();
+        };
+
+        let mut sessions = Vec::new();
+        for entry in self
+            .session_metadata
+            .list()
+            .await
+            .into_iter()
+            .filter(|entry| entry.project_id.as_deref() == Some(project_id))
+            .take(6)
+        {
+            let execution_context = resolve_execution_context_with_connected_nodes(
+                &self.state,
+                &entry.key,
+                Some(&entry),
+                Some(connected_nodes),
+            )
+            .await;
+            sessions.push(recent_session_summary_payload(&entry, &execution_context));
+        }
+        sessions
+    }
+
+    async fn prepare_context_view(
+        &self,
+        session_key: &str,
+        conn_id: Option<&str>,
+        session_entry: Option<SessionEntry>,
+        message_count: u32,
+    ) -> PreparedChatContextView {
+        let session_entry = session_entry.as_ref();
+        let context_capabilities = self.prepare_context_capabilities(session_entry).await;
+        let connected_nodes = self.state.connected_nodes().await;
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &self.state,
+            session_key,
+            session_entry,
+            Some(&connected_nodes),
+        )
+        .await;
+        let surface_ctx = resolve_channel_runtime_context(session_key, session_entry);
+        let project_info = self
+            .resolve_context_project_info(conn_id, session_entry)
+            .await;
+        let coordination = load_coordination_state(self.state_store.as_ref(), session_key).await;
+        let recent_sessions = self
+            .recent_workspace_sessions(
+                session_entry.and_then(|entry| entry.project_id.as_deref()),
+                &connected_nodes,
+            )
+            .await;
+        let session_info = active_session_payload(
+            session_key,
+            message_count,
+            session_entry,
+            &execution_context,
+            &surface_ctx,
+            project_info.get("label"),
+            context_capabilities.provider_name.as_deref(),
+        );
+        let messages = self
+            .session_store
+            .read(session_key)
+            .await
+            .unwrap_or_default();
+        let token_usage = session_token_usage_from_messages(&messages);
+        let sandbox_info =
+            sandbox_info_payload(&self.state, session_key, session_entry, &execution_context).await;
+        let host_is_root = detect_host_root_user().await;
+        let exec_mode = execution_mode_for_route(execution_context.route);
+        let exec_is_root = execution_root_for_route(execution_context.route, host_is_root);
+        let exec_prompt_symbol = exec_is_root.map(|is_root| {
+            if is_root {
+                "#"
+            } else {
+                "$"
+            }
+        });
+        let execution_info = serde_json::json!({
+            "mode": exec_mode,
+            "route": execution_context.route.as_str(),
+            "hostIsRoot": host_is_root,
+            "isRoot": exec_is_root,
+            "promptSymbol": exec_prompt_symbol,
+        });
+        let workspace_overview = workspace_overview_payload(
+            session_entry,
+            project_info.get("label"),
+            &project_info,
+            &session_info,
+            &execution_context,
+            &moltis_config::discover_and_load().tools.exec.approval_mode,
+            &coordination,
+            recent_sessions,
+        );
+
+        PreparedChatContextView {
+            session_info,
+            project_info,
+            workspace_overview,
+            context_capabilities,
+            sandbox_info,
+            execution_info,
+            token_usage,
+        }
     }
 
     pub fn with_hooks_arc(mut self, registry: Arc<moltis_common::hooks::HookRegistry>) -> Self {
@@ -4890,257 +5295,45 @@ impl ChatService for LiveChatService {
             self.session_key_for(conn_id.as_deref()).await
         };
 
-        // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
         let session_entry = self.session_metadata.get(&session_key).await;
-        let (provider_name, supports_tools) = {
-            let reg = self.providers.read().await;
-            let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
-            if let Some(id) = session_model {
-                let p = reg.get(id);
-                (
-                    p.as_ref().map(|p| p.name().to_string()),
-                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
-                )
-            } else {
-                let p = reg.first();
-                (
-                    p.as_ref().map(|p| p.name().to_string()),
-                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
-                )
-            }
-        };
-        let connected_nodes = self.state.connected_nodes().await;
-        let execution_context = resolve_execution_context_with_connected_nodes(
-            &self.state,
-            &session_key,
-            session_entry.as_ref(),
-            Some(&connected_nodes),
-        )
-        .await;
-        let surface_ctx = resolve_channel_runtime_context(&session_key, session_entry.as_ref());
-
-        // Project info & context files
         let conn_id = params
             .get("_conn_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let project_id = if let Some(cid) = conn_id.as_deref() {
-            self.state.active_project_id(cid).await
-        } else {
-            None
-        };
-        let project_id =
-            project_id.or_else(|| session_entry.as_ref().and_then(|e| e.project_id.clone()));
-
-        let project_info = if let Some(pid) = project_id {
-            match self
-                .state
-                .project_service()
-                .get(serde_json::json!({"id": pid}))
-                .await
-            {
-                Ok(val) => {
-                    let dir = val.get("directory").and_then(|v| v.as_str());
-                    let context_files = if let Some(d) = dir {
-                        match moltis_projects::context::load_context_files(Path::new(d)) {
-                            Ok(files) => files
-                                .iter()
-                                .map(|f| {
-                                    serde_json::json!({
-                                        "path": f.path.display().to_string(),
-                                        "size": f.content.len(),
-                                    })
-                                })
-                                .collect::<Vec<_>>(),
-                            Err(_) => vec![],
-                        }
-                    } else {
-                        vec![]
-                    };
-                    serde_json::json!({
-                        "id": val.get("id"),
-                        "label": val.get("label"),
-                        "directory": dir,
-                        "systemPrompt": val.get("system_prompt").or(val.get("systemPrompt")),
-                        "contextFiles": context_files,
-                    })
-                },
-                Err(_) => serde_json::json!(null),
-            }
-        } else {
-            serde_json::json!(null)
-        };
-        let coordination = load_coordination_state(self.state_store.as_ref(), &session_key).await;
-        let recent_sessions = if let Some(project_id) = session_entry
-            .as_ref()
-            .and_then(|entry| entry.project_id.as_deref())
-        {
-            let mut sessions = Vec::new();
-            for entry in self
-                .session_metadata
-                .list()
-                .await
-                .into_iter()
-                .filter(|entry| entry.project_id.as_deref() == Some(project_id))
-                .take(6)
-            {
-                let execution_context = resolve_execution_context_with_connected_nodes(
-                    &self.state,
-                    &entry.key,
-                    Some(&entry),
-                    Some(&connected_nodes),
-                )
-                .await;
-                sessions.push(recent_session_summary_payload(&entry, &execution_context));
-            }
-            sessions
-        } else {
-            Vec::new()
-        };
-        let workspace_linked_project = project_info.clone();
-        let session_info = active_session_payload(
-            &session_key,
-            message_count,
-            session_entry.as_ref(),
-            &execution_context,
-            &surface_ctx,
-            workspace_linked_project.get("label"),
-            provider_name.as_deref(),
-        );
-
-        // Tools (only include if the provider supports tool calling)
-        let mcp_disabled = session_entry
-            .as_ref()
-            .and_then(|e| e.mcp_disabled)
-            .unwrap_or(false);
-        let config = moltis_config::discover_and_load();
-        let tools: Vec<Value> = if supports_tools {
-            let registry_guard = self.tool_registry.read().await;
-            let effective_registry =
-                apply_runtime_tool_filters(&registry_guard, &config, &[], mcp_disabled);
-            effective_registry
-                .list_schemas()
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "name": s.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                        "description": s.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-                    })
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        // Token usage from API-reported counts stored in messages.
-        let messages = self
-            .session_store
-            .read(&session_key)
-            .await
-            .unwrap_or_default();
-        let usage = session_token_usage_from_messages(&messages);
-        let total_tokens = usage.session_input_tokens + usage.session_output_tokens;
-        let current_total_tokens =
-            usage.current_request_input_tokens + usage.current_request_output_tokens;
-
-        // Context window from the session's provider
-        let context_window = {
-            let reg = self.providers.read().await;
-            let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
-            if let Some(id) = session_model {
-                reg.get(id).map(|p| p.context_window()).unwrap_or(200_000)
-            } else {
-                reg.first().map(|p| p.context_window()).unwrap_or(200_000)
-            }
-        };
-
-        let sandbox_info = sandbox_info_payload(
-            &self.state,
-            &session_key,
-            session_entry.as_ref(),
-            &execution_context,
-        )
-        .await;
-        let host_is_root = detect_host_root_user().await;
-        let exec_mode = execution_mode_for_route(execution_context.route);
-        let exec_is_root = execution_root_for_route(execution_context.route, host_is_root);
-        let exec_prompt_symbol = exec_is_root.map(|is_root| {
-            if is_root {
-                "#"
-            } else {
-                "$"
-            }
-        });
-        let execution_info = serde_json::json!({
-            "mode": exec_mode,
-            "route": execution_context.route.as_str(),
-            "hostIsRoot": host_is_root,
-            "isRoot": exec_is_root,
-            "promptSymbol": exec_prompt_symbol,
-        });
-
-        // Discover enabled skills/plugins (only if provider supports tools)
-        let skills_list: Vec<Value> = if supports_tools {
-            let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-            let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-            match discoverer.discover().await {
-                Ok(s) => s
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "description": s.description,
-                            "source": s.source,
-                        })
-                    })
-                    .collect(),
-                Err(_) => vec![],
-            }
-        } else {
-            vec![]
-        };
-
-        // MCP servers (only if provider supports tools)
-        let mcp_servers = if supports_tools {
-            self.state
-                .mcp_service()
-                .list()
-                .await
-                .unwrap_or(serde_json::json!([]))
-        } else {
-            serde_json::json!([])
-        };
+        let prepared = self
+            .prepare_context_view(
+                &session_key,
+                conn_id.as_deref(),
+                session_entry,
+                message_count,
+            )
+            .await;
+        let total_tokens =
+            prepared.token_usage.session_input_tokens + prepared.token_usage.session_output_tokens;
+        let current_total_tokens = prepared.token_usage.current_request_input_tokens
+            + prepared.token_usage.current_request_output_tokens;
 
         Ok(serde_json::json!({
-            "session": session_info.clone(),
-            "project": project_info,
-            "workspaceOverview": workspace_overview_payload(
-                session_entry.as_ref(),
-                workspace_linked_project.get("label"),
-                &workspace_linked_project,
-                &session_info,
-                &execution_context,
-                &config.tools.exec.approval_mode,
-                &coordination,
-                recent_sessions,
-            ),
-            "tools": tools,
-            "skills": skills_list,
-            "mcpServers": mcp_servers,
-            "mcpDisabled": mcp_disabled,
-            "sandbox": sandbox_info,
-            "execution": execution_info,
-            "supportsTools": supports_tools,
+            "session": prepared.session_info,
+            "project": prepared.project_info,
+            "workspaceOverview": prepared.workspace_overview,
+            "tools": prepared.context_capabilities.tools,
+            "skills": prepared.context_capabilities.skills,
+            "mcpServers": prepared.context_capabilities.mcp_servers,
+            "mcpDisabled": prepared.context_capabilities.mcp_disabled,
+            "sandbox": prepared.sandbox_info,
+            "execution": prepared.execution_info,
+            "supportsTools": prepared.context_capabilities.supports_tools,
             "tokenUsage": {
-                "inputTokens": usage.session_input_tokens,
-                "outputTokens": usage.session_output_tokens,
+                "inputTokens": prepared.token_usage.session_input_tokens,
+                "outputTokens": prepared.token_usage.session_output_tokens,
                 "total": total_tokens,
-                "currentInputTokens": usage.current_request_input_tokens,
-                "currentOutputTokens": usage.current_request_output_tokens,
+                "currentInputTokens": prepared.token_usage.current_request_input_tokens,
+                "currentOutputTokens": prepared.token_usage.current_request_output_tokens,
                 "currentTotal": current_total_tokens,
-                "estimatedNextInputTokens": usage.current_request_input_tokens,
-                "contextWindow": context_window,
+                "estimatedNextInputTokens": prepared.token_usage.current_request_input_tokens,
+                "contextWindow": prepared.context_capabilities.context_window,
             },
         }))
     }
@@ -5171,98 +5364,18 @@ impl ChatService for LiveChatService {
             .resolve_provider(&session_key, &history)
             .await
             .map_err(ServiceError::message)?;
-        let tool_mode = effective_tool_mode(&*provider);
-        let native_tools = matches!(tool_mode, ToolMode::Native);
-        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
-
-        // Build runtime context.
-        let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
-        let mut runtime_context = build_prompt_runtime_context(
-            &self.state,
-            &provider,
-            &session_key,
-            session_entry.as_ref(),
-        )
-        .await;
-        apply_request_runtime_context(&mut runtime_context.host, &params);
-
-        // Resolve project context.
-        let project_context = self
-            .resolve_project_context(&session_key, conn_id.as_deref())
+        let prepared = self
+            .prepare_prompt_view(&provider, &session_key, conn_id.as_deref(), &params)
             .await;
-
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
-
-        // Check MCP disabled.
-        let mcp_disabled = session_entry
-            .as_ref()
-            .and_then(|entry| entry.mcp_disabled)
-            .unwrap_or(false);
-
-        // Build filtered tool registry.
-        let filtered_registry = {
-            let registry_guard = self.tool_registry.read().await;
-            if tools_enabled {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
-        };
-
-        let tool_count = filtered_registry.list_schemas().len();
-
-        // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        };
-
-        let char_count = system_prompt.len();
+        let char_count = prepared.system_prompt.len();
 
         Ok(serde_json::json!({
-            "prompt": system_prompt,
+            "prompt": prepared.system_prompt,
             "charCount": char_count,
-            "native_tools": native_tools,
-            "tools_enabled": tools_enabled,
-            "tool_mode": format!("{:?}", tool_mode),
-            "toolCount": tool_count,
+            "native_tools": prepared.native_tools,
+            "tools_enabled": prepared.tools_enabled,
+            "tool_mode": format!("{:?}", prepared.tool_mode),
+            "toolCount": prepared.tool_count,
         }))
     }
 
@@ -5294,88 +5407,10 @@ impl ChatService for LiveChatService {
             .resolve_provider(&session_key, &history)
             .await
             .map_err(ServiceError::message)?;
-        let tool_mode = effective_tool_mode(&*provider);
-        let native_tools = matches!(tool_mode, ToolMode::Native);
-        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
-
-        // Build runtime context.
-        let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
-        let mut runtime_context = build_prompt_runtime_context(
-            &self.state,
-            &provider,
-            &session_key,
-            session_entry.as_ref(),
-        )
-        .await;
-        apply_request_runtime_context(&mut runtime_context.host, &params);
-
-        // Resolve project context.
-        let project_context = self
-            .resolve_project_context(&session_key, conn_id.as_deref())
+        let prepared = self
+            .prepare_prompt_view(&provider, &session_key, conn_id.as_deref(), &params)
             .await;
-
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
-
-        // Check MCP disabled.
-        let mcp_disabled = session_entry
-            .as_ref()
-            .and_then(|entry| entry.mcp_disabled)
-            .unwrap_or(false);
-
-        // Build filtered tool registry.
-        let filtered_registry = {
-            let registry_guard = self.tool_registry.read().await;
-            if tools_enabled {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
-        };
-
-        // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        };
-
-        let system_prompt_chars = system_prompt.len();
+        let system_prompt_chars = prepared.system_prompt.len();
 
         // Keep raw assistant outputs (including provider/model/token metadata)
         // so the UI can show a debug view of what the LLM actually returned.
@@ -5388,7 +5423,7 @@ impl ChatService for LiveChatService {
         // Build the full messages array: system prompt + conversation history.
         // `values_to_chat_messages` handles `tool_result` → `tool` conversion.
         let mut messages = Vec::with_capacity(1 + history.len());
-        messages.push(ChatMessage::system(system_prompt));
+        messages.push(ChatMessage::system(prepared.system_prompt));
         messages.extend(values_to_chat_messages(&history));
 
         let openai_messages: Vec<Value> = messages.iter().map(|m| m.to_openai_value()).collect();
@@ -9905,6 +9940,23 @@ mod tests {
     }
 
     #[test]
+    fn normalize_mcp_servers_payload_accepts_wrapped_or_array_shapes() {
+        let wrapped = normalize_mcp_servers_payload(serde_json::json!({
+            "servers": [
+                { "name": "alpha", "state": "running" }
+            ]
+        }));
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0]["name"], "alpha");
+
+        let array = normalize_mcp_servers_payload(serde_json::json!([
+            { "name": "beta", "state": "running" }
+        ]));
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["name"], "beta");
+    }
+
+    #[test]
     fn external_activity_summary_payload_counts_sources() {
         let activities = vec![
             coordinator::ExternalActivity {
@@ -11123,6 +11175,216 @@ mod tests {
             matches!(chat_msgs[0], ChatMessage::User { .. }),
             "first ChatMessage after compaction must be User (issue #501)"
         );
+    }
+
+    #[tokio::test]
+    async fn raw_prompt_reports_tool_mode_metadata_from_prepared_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: false,
+                mode: Some(ToolMode::Off),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let raw = service
+            .raw_prompt(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("raw_prompt should succeed");
+
+        assert_eq!(raw["tool_mode"], "Off");
+        assert_eq!(raw["native_tools"], false);
+        assert_eq!(raw["tools_enabled"], false);
+        assert!(raw["toolCount"].as_u64().is_some());
+        assert!(
+            raw["prompt"]
+                .as_str()
+                .is_some_and(|prompt| !prompt.trim().is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_prompt_matches_full_context_system_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        store
+            .append(
+                "main",
+                &serde_json::json!({
+                    "role": "user",
+                    "content": "hello",
+                }),
+            )
+            .await
+            .expect("seed history");
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: false,
+                mode: Some(ToolMode::Text),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let raw = service
+            .raw_prompt(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("raw_prompt should succeed");
+        let full = service
+            .full_context(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("full_context should succeed");
+
+        assert_eq!(full["messages"][0]["role"], "system");
+        assert_eq!(full["messages"][0]["content"], raw["prompt"]);
+        assert_eq!(full["systemPromptChars"], raw["charCount"]);
+    }
+
+    #[tokio::test]
+    async fn context_returns_normalized_mcp_servers_array() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: true,
+                mode: Some(ToolMode::Native),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let context = service
+            .context(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("context should succeed");
+
+        assert_eq!(context["supportsTools"], true);
+        assert!(context["mcpServers"].is_array());
+        assert_eq!(context["mcpServers"].as_array().map(Vec::len), Some(0));
+        assert!(context["tokenUsage"]["contextWindow"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn context_reuses_prepared_current_session_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        metadata
+            .upsert("main", Some("Main".to_string()))
+            .await
+            .expect("seed session");
+        let _ = metadata
+            .set_external_agent_source("main", Some(ExternalAgentSource::Codex))
+            .await;
+        metadata.touch("main", 1).await;
+
+        store
+            .append(
+                "main",
+                &serde_json::json!({
+                    "role": "assistant",
+                    "content": "hello",
+                    "inputTokens": 12,
+                    "outputTokens": 5,
+                }),
+            )
+            .await
+            .expect("seed history");
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: false,
+                mode: Some(ToolMode::Text),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let context = service
+            .context(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("context should succeed");
+
+        assert_eq!(context["session"]["key"], "main");
+        assert_eq!(
+            context["workspaceOverview"]["currentSession"],
+            context["session"]
+        );
+        assert_eq!(context["session"]["externalAgentSource"], "codex");
+        assert_eq!(context["session"]["executionRoute"], "local");
+        assert_eq!(context["session"]["machine"]["id"], "local");
+        assert_eq!(context["tokenUsage"]["total"], 17);
     }
 
     #[test]
