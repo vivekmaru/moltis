@@ -225,6 +225,7 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
         let project_id = entry.project_id.clone();
         let machine = bootstrap_machine_descriptor(&entry, &inventory);
         let execution_route = machine.execution_route;
+        let mut machine_contract = moltis_gateway::machine::session_contract_fields(&machine);
         let machine = serde_json::to_value(machine).unwrap_or(serde_json::Value::Null);
         let external_agent_source = entry
             .external_agent_source
@@ -242,7 +243,9 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
             "lastSeenMessageCount": entry.last_seen_message_count,
             "projectId": project_id.clone(),
             "workspace": project_id,
-            "sandbox_enabled": entry.sandbox_enabled,
+            "sandbox_enabled": machine_contract
+                .remove("sandbox_enabled")
+                .unwrap_or(serde_json::Value::Null),
             "sandbox_image": entry.sandbox_image,
             "worktree_branch": entry.worktree_branch,
             "channelBinding": entry.channel_binding,
@@ -254,7 +257,9 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
             "archived": entry.archived,
             "agent_id": agent_id,
             "agentId": agent_id_camel,
-            "node_id": entry.node_id,
+            "node_id": machine_contract
+                .remove("node_id")
+                .unwrap_or(serde_json::Value::Null),
             "executionRoute": execution_route,
             "machine": machine,
             "externalAgentSource": external_agent_source,
@@ -993,10 +998,13 @@ mod tests {
         let inventory = inventory_with_machines([], false);
         let machine = bootstrap_machine_descriptor(&entry, &inventory);
         let execution_route = machine.execution_route;
+        let mut machine_contract = moltis_gateway::machine::session_contract_fields(&machine);
         let machine = serde_json::to_value(machine).unwrap();
 
         let payload = serde_json::json!({
             "workspace": entry.project_id,
+            "sandbox_enabled": machine_contract.remove("sandbox_enabled").unwrap(),
+            "node_id": machine_contract.remove("node_id").unwrap(),
             "executionRoute": execution_route,
             "machine": machine,
             "externalAgentSource": entry
@@ -1006,8 +1014,46 @@ mod tests {
         });
 
         assert_eq!(payload["workspace"], "workspace-1");
+        assert_eq!(payload["sandbox_enabled"], false);
+        assert!(payload["node_id"].is_null());
         assert_eq!(payload["executionRoute"], "local");
         assert_eq!(payload["machine"]["id"], "local");
         assert_eq!(payload["externalAgentSource"], "codex");
+    }
+
+    #[test]
+    fn bootstrap_snapshot_remote_aliases_follow_machine_contract() {
+        let mut entry = session_entry();
+        entry.node_id = Some("node-build".to_string());
+        let inventory = inventory_with_machines(
+            [MachineDescriptor {
+                id: "node-build".to_string(),
+                label: "Build node".to_string(),
+                kind: moltis_gateway::machine::MachineKind::Node,
+                execution_route: "node",
+                trust_state: MachineTrustState::PairedNode,
+                health: MachineHealth::Ready,
+                available: true,
+                platform: Some("linux".to_string()),
+                node_id: Some("node-build".to_string()),
+                remote_ip: Some("10.0.0.5".to_string()),
+                host_pinned: None,
+                telemetry_stale: Some(false),
+                capabilities: vec!["system.run".to_string()],
+                commands: vec!["system.run".to_string()],
+            }],
+            false,
+        );
+        let machine = bootstrap_machine_descriptor(&entry, &inventory);
+        let mut machine_contract = moltis_gateway::machine::session_contract_fields(&machine);
+
+        assert_eq!(
+            machine_contract.remove("node_id"),
+            Some(serde_json::Value::String("node-build".to_string()))
+        );
+        assert_eq!(
+            machine_contract.remove("sandbox_enabled"),
+            Some(serde_json::Value::Bool(false))
+        );
     }
 }
