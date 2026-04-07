@@ -5049,6 +5049,7 @@ impl ChatService for LiveChatService {
             "workspaceOverview": {
                 "workspaceId": session_entry.as_ref().and_then(|entry| entry.project_id.as_deref()),
                 "workspaceLabel": workspace_linked_project.get("label"),
+                "currentSession": session_info.clone(),
                 "linkedProject": workspace_linked_project,
                 "currentBranch": session_entry.as_ref().and_then(|entry| entry.worktree_branch.as_deref()),
                 "currentExecutionRoute": execution_context.route.as_str(),

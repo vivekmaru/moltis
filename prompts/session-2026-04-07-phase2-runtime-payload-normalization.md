@@ -19,6 +19,10 @@ payloads carry concrete node identity instead of a generic placeholder state.
   - reuses the normalized route / machine / external-agent fields
   - adds `workspaceLabel` to the active session payload
   - keeps active session and recent-session payloads closer to the same shape
+- `chat.context().workspaceOverview` now also carries `currentSession`:
+  - mirrors the normalized active-session payload
+  - lets the `/context` workspace overview prefer current route / machine / source from one object
+  - preserves the older top-level fields as fallback compatibility
 - Added focused `moltis-chat` tests covering:
   - connected node display-name propagation
   - stale connected node degradation
@@ -36,3 +40,5 @@ payloads carry concrete node identity instead of a generic placeholder state.
 - `cargo test -p moltis-chat resolve_execution_context_marks_connected_node_ready`
 - `cargo test -p moltis-chat active_session_payload_uses_normalized_runtime_fields`
 - `cargo test -p moltis-chat active_session_payload_defaults_workspace_label_to_null`
+- `/opt/homebrew/bin/biome check --write crates/web/src/assets/js/page-chat.js crates/web/ui/e2e/specs/chat-input.spec.js crates/web/src/assets/js/components/workspace-overview.js crates/web/ui/e2e/specs/workspace-overview.spec.js`
+- `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /usr/local/bin/npx playwright test e2e/specs/chat-input.spec.js --grep "/context shows normalized route, machine, and source labels"`
