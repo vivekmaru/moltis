@@ -64,6 +64,15 @@ impl ExecutionRoute {
     }
 }
 
+fn execution_route_for_machine_kind(kind: crate::machine::MachineKind) -> ExecutionRoute {
+    match kind {
+        crate::machine::MachineKind::Local => ExecutionRoute::Local,
+        crate::machine::MachineKind::Sandbox => ExecutionRoute::Sandbox,
+        crate::machine::MachineKind::Ssh => ExecutionRoute::Ssh,
+        crate::machine::MachineKind::Node => ExecutionRoute::Node,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionKind {
     Web,
@@ -1083,23 +1092,20 @@ impl LiveSessionService {
     }
 
     async fn effective_execution_route(&self, entry: &SessionEntry) -> ExecutionRoute {
-        if let Some(node_id) = entry.node_id.as_deref() {
-            return if node_id.starts_with("ssh:") {
-                ExecutionRoute::Ssh
-            } else {
-                ExecutionRoute::Node
-            };
-        }
-
-        if let Some(ref router) = self.sandbox_router {
+        let sandbox_active = if let Some(ref router) = self.sandbox_router {
             if router.is_sandboxed(&entry.key).await {
-                return ExecutionRoute::Sandbox;
+                true
+            } else {
+                entry.sandbox_enabled == Some(true)
             }
-        } else if entry.sandbox_enabled == Some(true) {
-            return ExecutionRoute::Sandbox;
-        }
+        } else {
+            entry.sandbox_enabled == Some(true)
+        };
 
-        ExecutionRoute::Local
+        execution_route_for_machine_kind(crate::machine::session_machine_kind(
+            entry,
+            sandbox_active,
+        ))
     }
 
     async fn workspace_label(&self, project_id: Option<&str>) -> Option<String> {
