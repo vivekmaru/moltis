@@ -317,6 +317,11 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 	var [title, setTitle] = useState("");
 	var [summary, setSummary] = useState("");
 	var [link, setLink] = useState("");
+	var [importedSessionKey, setImportedSessionKey] = useState("");
+	var [importedMessageCount, setImportedMessageCount] = useState("");
+	var [currentPlan, setCurrentPlan] = useState("");
+	var [nextAction, setNextAction] = useState("");
+	var [durableNotes, setDurableNotes] = useState("");
 	var [saving, setSaving] = useState(false);
 	var [error, setError] = useState("");
 
@@ -326,6 +331,11 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		setTitle("");
 		setSummary("");
 		setLink("");
+		setImportedSessionKey("");
+		setImportedMessageCount("");
+		setCurrentPlan("");
+		setNextAction("");
+		setDurableNotes("");
 		setSaving(false);
 		setError("");
 	}, [sessionKey]);
@@ -335,6 +345,11 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		setTitle("");
 		setSummary("");
 		setLink("");
+		setImportedSessionKey("");
+		setImportedMessageCount("");
+		setCurrentPlan("");
+		setNextAction("");
+		setDurableNotes("");
 		setError("");
 	}
 
@@ -348,6 +363,23 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 			);
 	}
 
+	function attachRequestPayload(trimmedSummary) {
+		var parsedImportedMessageCount = Number.parseInt(importedMessageCount, 10);
+		return {
+			key: sessionKey,
+			source: source,
+			title: title.trim() || null,
+			summary: trimmedSummary,
+			link: link.trim() || null,
+			importedSessionKey: importedSessionKey.trim() || null,
+			importedMessageCount:
+				importedMessageCount.trim() && Number.isFinite(parsedImportedMessageCount) ? parsedImportedMessageCount : null,
+			currentPlan: currentPlan.trim() || null,
+			nextAction: nextAction.trim() || null,
+			durableNotes: durableNotes.trim() || null,
+		};
+	}
+
 	async function submitAttach(event) {
 		event?.preventDefault?.();
 		if (!sessionKey || saving) return;
@@ -358,13 +390,7 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		}
 		setSaving(true);
 		setError("");
-		var result = await sendRpc("sessions.external.attach", {
-			key: sessionKey,
-			source: source,
-			title: title.trim() || null,
-			summary: trimmedSummary,
-			link: link.trim() || null,
-		});
+		var result = await sendRpc("sessions.external.attach", attachRequestPayload(trimmedSummary));
 		setSaving(false);
 		if (!result?.ok) {
 			setError(localizedRpcErrorMessage(result?.error));
@@ -436,6 +462,63 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 								onInput=${(event) => setLink(event.target.value)}
 							/>
 						</label>
+						<div class="grid gap-2 md:grid-cols-2">
+							<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+								<span>Imported session key</span>
+								<input
+									type="text"
+									class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+									placeholder="session:abc123"
+									value=${importedSessionKey}
+									onInput=${(event) => setImportedSessionKey(event.target.value)}
+								/>
+							</label>
+							<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+								<span>Imported message count</span>
+								<input
+									type="number"
+									min="0"
+									inputmode="numeric"
+									class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+									placeholder="24"
+									value=${importedMessageCount}
+									onInput=${(event) => setImportedMessageCount(event.target.value)}
+								/>
+							</label>
+						</div>
+						<div class="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2.5 flex flex-col gap-2">
+							<div class="text-xs font-medium uppercase tracking-[0.08em] text-[var(--muted)]">
+								Coordinator update
+							</div>
+							<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+								<span>Current plan</span>
+								<textarea
+									class="min-h-[64px] rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-3 py-2 text-sm text-[var(--text)]"
+									placeholder="Capture the plan that this external run established."
+									value=${currentPlan}
+									onInput=${(event) => setCurrentPlan(event.target.value)}
+								></textarea>
+							</label>
+							<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+								<span>Next action</span>
+								<input
+									type="text"
+									class="rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-3 py-2 text-sm text-[var(--text)]"
+									placeholder="What should the next session do?"
+									value=${nextAction}
+									onInput=${(event) => setNextAction(event.target.value)}
+								/>
+							</label>
+							<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+								<span>Durable notes</span>
+								<textarea
+									class="min-h-[72px] rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-3 py-2 text-sm text-[var(--text)]"
+									placeholder="Optional durable notes to preserve with the handoff."
+									value=${durableNotes}
+									onInput=${(event) => setDurableNotes(event.target.value)}
+								></textarea>
+							</label>
+						</div>
 						${error && html`<div class="text-xs text-[var(--error)]">${error}</div>`}
 						<div class="flex flex-wrap items-center justify-end gap-2">
 							<button
@@ -464,6 +547,16 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 									<div class="flex items-center justify-between gap-2 text-xs">
 										<div class="font-medium text-[var(--text)]">${activity.title || "Attached external work"}</div>
 										<div class="text-[var(--muted)]">${sourceLabel(activity.source)}</div>
+									</div>
+									<div class="flex flex-wrap gap-1.5">
+										${
+											activity.importedSessionKey &&
+											html`<${InventoryBadge} tone="muted">Session: ${activity.importedSessionKey}</${InventoryBadge}>`
+										}
+										${
+											activity.importedMessageCount != null &&
+											html`<${InventoryBadge} tone="muted">${activity.importedMessageCount} msgs</${InventoryBadge}>`
+										}
 									</div>
 									<div class="text-xs leading-relaxed text-[var(--text)]">${activity.summary}</div>
 									<div class="flex items-center justify-between gap-2 text-[11px] text-[var(--muted)]">

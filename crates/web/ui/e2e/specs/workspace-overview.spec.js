@@ -334,11 +334,19 @@ test.describe("Workspace overview", () => {
 					summary: params.summary,
 					link: params.link,
 					attachedAt: Date.now(),
+					importedSessionKey: params.importedSessionKey,
+					importedMessageCount: params.importedMessageCount,
 				};
 				overviewPayload.externalActivities = [activity, ...overviewPayload.externalActivities];
 				overviewPayload.externalActivitySummary.count += 1;
 				overviewPayload.externalActivitySummary.sources[params.source] =
 					(overviewPayload.externalActivitySummary.sources[params.source] || 0) + 1;
+				overviewPayload.coordination = {
+					...overviewPayload.coordination,
+					currentPlan: params.currentPlan || null,
+					nextAction: params.nextAction || null,
+					durableNotes: params.durableNotes || null,
+				};
 				return {
 					activity,
 					coordination: overviewPayload.coordination,
@@ -423,14 +431,30 @@ test.describe("Workspace overview", () => {
 		await chatMoreModal.getByLabel("Title").fill("Claude Code handoff");
 		await chatMoreModal.getByLabel("Summary").fill("Captured a working branch plan and a cleanup follow-up.");
 		await chatMoreModal.getByLabel("Link").fill("https://example.com/handoff");
+		await chatMoreModal.getByLabel("Imported session key").fill("session:claude-42");
+		await chatMoreModal.getByLabel("Imported message count").fill("24");
+		await chatMoreModal.getByLabel("Current plan").fill("Finalize the cleanup list and validate the branch.");
+		await chatMoreModal.getByLabel("Next action").fill("Run the validation pass from the coordinator session.");
+		await chatMoreModal.getByLabel("Durable notes").fill("Claude Code already prepared the branch plan.");
 		await chatMoreModal.getByRole("button", { name: "Attach", exact: true }).click();
 
 		await expect(chatMoreModal.getByText("Claude Code handoff", { exact: true })).toBeVisible();
 		await expect(
 			chatMoreModal.getByText("Captured a working branch plan and a cleanup follow-up.", { exact: true }),
 		).toBeVisible();
+		await expect(chatMoreModal.getByText("Session: session:claude-42", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("24 msgs", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Claude Code: 1", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Source: Claude Code", { exact: true }).first()).toBeVisible();
+		await expect(
+			chatMoreModal.getByText("Finalize the cleanup list and validate the branch.", { exact: true }),
+		).toBeVisible();
+		await expect(
+			chatMoreModal.getByText("Run the validation pass from the coordinator session.", { exact: true }),
+		).toBeVisible();
+		await expect(
+			chatMoreModal.getByText("Claude Code already prepared the branch plan.", { exact: true }),
+		).toBeVisible();
 		await expect(chatMoreModal.getByRole("link", { name: "Open" })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});

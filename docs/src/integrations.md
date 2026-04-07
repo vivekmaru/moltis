@@ -104,9 +104,14 @@ The first external-agent handoff path is explicit and auditable rather than
 deeply embedded in editors.
 
 From the web UI, open the workspace overview and use **Attach external work**
-to record a short Codex / Claude Code / Copilot / API handoff against the
-active session. That form writes back into the same durable workspace state the
-RPCs use.
+to record a Codex / Claude Code / Copilot / API handoff against the active
+session. That form writes back into the same durable workspace state the RPCs
+use, and it can also carry:
+
+- imported session identifiers
+- imported message counts
+- current plan / next action coordinator notes
+- durable notes that should survive the handoff
 
 Use:
 

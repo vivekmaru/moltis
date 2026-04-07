@@ -145,6 +145,19 @@ attached work is kept separate from the live conversation and from durable
 notes, which helps Moltis stay in the coordinator role instead of flattening
 every external run into one chat transcript.
 
+The attach form can also capture import metadata and coordinator state in one
+step:
+
+- imported session key
+- imported message count
+- current plan
+- next action
+- durable notes
+
+That is useful when you want to hand a branch back from Codex / Claude Code /
+Copilot and leave the next Moltis session with a clear landing point instead of
+just a loose summary.
+
 ## Recommended Settings
 
 ### Personal workstation
