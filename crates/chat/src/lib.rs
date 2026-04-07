@@ -1195,10 +1195,12 @@ fn machine_payload(
             "route": "local",
             "executionRoute": "local",
             "label": "Local host",
+            "platform": "local",
             "nodeId": Value::Null,
             "trustState": "trusted_local",
             "health": "ready",
             "available": true,
+            "telemetryStale": Value::Null,
         }),
         ExecutionRoute::Sandbox => serde_json::json!({
             "id": "sandbox",
@@ -1206,10 +1208,12 @@ fn machine_payload(
             "route": "sandbox",
             "executionRoute": "sandbox",
             "label": "Sandbox",
+            "platform": "sandbox",
             "nodeId": Value::Null,
             "trustState": "sandboxed",
             "health": if sandbox_available { "ready" } else { "unavailable" },
             "available": sandbox_available,
+            "telemetryStale": Value::Null,
         }),
         ExecutionRoute::Ssh => {
             serde_json::json!({
@@ -1218,10 +1222,12 @@ fn machine_payload(
                 "route": "ssh",
                 "executionRoute": "ssh",
                 "label": "SSH target",
+                "platform": "ssh",
                 "nodeId": node_id,
                 "trustState": "managed_ssh",
                 "health": if node_id.is_some() { "ready" } else { "unavailable" },
                 "available": node_id.is_some(),
+                "telemetryStale": Value::Null,
             })
         },
         ExecutionRoute::Node => {
@@ -1248,10 +1254,12 @@ fn machine_payload(
                 "route": "node",
                 "executionRoute": "node",
                 "label": node_label,
+                "platform": connected_node.map(|node| node.platform.as_str()).unwrap_or("node"),
                 "nodeId": node_id,
                 "trustState": "paired_node",
                 "health": node_health,
                 "available": node_available,
+                "telemetryStale": connected_node.map(|node| node.telemetry_stale),
             })
         },
     }
@@ -9773,8 +9781,10 @@ mod tests {
         assert_eq!(summary["executionRoute"], "node");
         assert_eq!(summary["machine"]["id"], "node:ready");
         assert_eq!(summary["machine"]["label"], "node:ready");
+        assert_eq!(summary["machine"]["platform"], "linux");
         assert_eq!(summary["machine"]["available"], true);
         assert_eq!(summary["machine"]["health"], "ready");
+        assert_eq!(summary["machine"]["telemetryStale"], false);
     }
 
     #[tokio::test]
@@ -9934,7 +9944,9 @@ mod tests {
 
         assert_eq!(resolved.machine["id"], "node:builder");
         assert_eq!(resolved.machine["label"], "Build box");
+        assert_eq!(resolved.machine["platform"], "linux");
         assert_eq!(resolved.machine["health"], "ready");
+        assert_eq!(resolved.machine["telemetryStale"], false);
     }
 
     #[tokio::test]
@@ -9958,8 +9970,10 @@ mod tests {
 
         assert_eq!(resolved.machine["id"], "node:stale");
         assert_eq!(resolved.machine["label"], "Stale box");
+        assert_eq!(resolved.machine["platform"], "linux");
         assert_eq!(resolved.machine["available"], true);
         assert_eq!(resolved.machine["health"], "degraded");
+        assert_eq!(resolved.machine["telemetryStale"], true);
     }
 
     #[tokio::test]

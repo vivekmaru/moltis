@@ -12,6 +12,9 @@ payloads carry concrete node identity instead of a generic placeholder state.
   - keep the node ID as the machine ID / binding identity
   - report `health=degraded` when the connected node telemetry is stale
   - keep `health=unavailable` when the bound node is missing
+- Chat-side machine payloads now also carry:
+  - `platform` for every execution route
+  - `telemetryStale` for node-backed sessions, matching connected-node state
 - Added focused `moltis-chat` tests covering:
   - connected node display-name propagation
   - stale connected node degradation
