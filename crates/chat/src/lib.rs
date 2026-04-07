@@ -2728,6 +2728,14 @@ struct ActiveAssistantDraft {
     run_id: String,
 }
 
+struct PreparedPromptView {
+    system_prompt: String,
+    tool_mode: ToolMode,
+    native_tools: bool,
+    tools_enabled: bool,
+    tool_count: usize,
+}
+
 impl ActiveAssistantDraft {
     fn new(run_id: &str, model: &str, provider: &str, seq: Option<u64>) -> Self {
         Self {
@@ -2931,6 +2939,96 @@ impl LiveChatService {
     pub fn with_hooks(mut self, registry: moltis_common::hooks::HookRegistry) -> Self {
         self.hook_registry = Some(Arc::new(registry));
         self
+    }
+
+    async fn prepare_prompt_view(
+        &self,
+        provider: &Arc<dyn moltis_agents::model::LlmProvider>,
+        session_key: &str,
+        conn_id: Option<&str>,
+        params: &Value,
+    ) -> PreparedPromptView {
+        let tool_mode = effective_tool_mode(&**provider);
+        let native_tools = matches!(tool_mode, ToolMode::Native);
+        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
+
+        let session_entry = self.session_metadata.get(session_key).await;
+        let persona = load_prompt_persona_for_session(session_entry.as_ref());
+        let mut runtime_context = build_prompt_runtime_context(
+            &self.state,
+            provider,
+            session_key,
+            session_entry.as_ref(),
+        )
+        .await;
+        apply_request_runtime_context(&mut runtime_context.host, params);
+
+        let project_context = self.resolve_project_context(session_key, conn_id).await;
+
+        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+        let discovered_skills = match discoverer.discover().await {
+            Ok(skills) => skills,
+            Err(error) => {
+                warn!("failed to discover skills: {error}");
+                Vec::new()
+            },
+        };
+
+        let mcp_disabled = session_entry
+            .as_ref()
+            .and_then(|entry| entry.mcp_disabled)
+            .unwrap_or(false);
+
+        let filtered_registry = {
+            let registry_guard = self.tool_registry.read().await;
+            if tools_enabled {
+                apply_runtime_tool_filters(
+                    &registry_guard,
+                    &persona.config,
+                    &discovered_skills,
+                    mcp_disabled,
+                )
+            } else {
+                registry_guard.clone_without(&[])
+            }
+        };
+        let tool_count = filtered_registry.list_schemas().len();
+
+        let system_prompt = if tools_enabled {
+            build_system_prompt_with_session_runtime(
+                &filtered_registry,
+                native_tools,
+                project_context.as_deref(),
+                &discovered_skills,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+                persona.memory_text.as_deref(),
+            )
+        } else {
+            build_system_prompt_minimal_runtime(
+                project_context.as_deref(),
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+                persona.memory_text.as_deref(),
+            )
+        };
+
+        PreparedPromptView {
+            system_prompt,
+            tool_mode,
+            native_tools,
+            tools_enabled,
+            tool_count,
+        }
     }
 
     pub fn with_hooks_arc(mut self, registry: Arc<moltis_common::hooks::HookRegistry>) -> Self {
@@ -5171,98 +5269,18 @@ impl ChatService for LiveChatService {
             .resolve_provider(&session_key, &history)
             .await
             .map_err(ServiceError::message)?;
-        let tool_mode = effective_tool_mode(&*provider);
-        let native_tools = matches!(tool_mode, ToolMode::Native);
-        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
-
-        // Build runtime context.
-        let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
-        let mut runtime_context = build_prompt_runtime_context(
-            &self.state,
-            &provider,
-            &session_key,
-            session_entry.as_ref(),
-        )
-        .await;
-        apply_request_runtime_context(&mut runtime_context.host, &params);
-
-        // Resolve project context.
-        let project_context = self
-            .resolve_project_context(&session_key, conn_id.as_deref())
+        let prepared = self
+            .prepare_prompt_view(&provider, &session_key, conn_id.as_deref(), &params)
             .await;
-
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
-
-        // Check MCP disabled.
-        let mcp_disabled = session_entry
-            .as_ref()
-            .and_then(|entry| entry.mcp_disabled)
-            .unwrap_or(false);
-
-        // Build filtered tool registry.
-        let filtered_registry = {
-            let registry_guard = self.tool_registry.read().await;
-            if tools_enabled {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
-        };
-
-        let tool_count = filtered_registry.list_schemas().len();
-
-        // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        };
-
-        let char_count = system_prompt.len();
+        let char_count = prepared.system_prompt.len();
 
         Ok(serde_json::json!({
-            "prompt": system_prompt,
+            "prompt": prepared.system_prompt,
             "charCount": char_count,
-            "native_tools": native_tools,
-            "tools_enabled": tools_enabled,
-            "tool_mode": format!("{:?}", tool_mode),
-            "toolCount": tool_count,
+            "native_tools": prepared.native_tools,
+            "tools_enabled": prepared.tools_enabled,
+            "tool_mode": format!("{:?}", prepared.tool_mode),
+            "toolCount": prepared.tool_count,
         }))
     }
 
@@ -5294,88 +5312,10 @@ impl ChatService for LiveChatService {
             .resolve_provider(&session_key, &history)
             .await
             .map_err(ServiceError::message)?;
-        let tool_mode = effective_tool_mode(&*provider);
-        let native_tools = matches!(tool_mode, ToolMode::Native);
-        let tools_enabled = !matches!(tool_mode, ToolMode::Off);
-
-        // Build runtime context.
-        let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
-        let mut runtime_context = build_prompt_runtime_context(
-            &self.state,
-            &provider,
-            &session_key,
-            session_entry.as_ref(),
-        )
-        .await;
-        apply_request_runtime_context(&mut runtime_context.host, &params);
-
-        // Resolve project context.
-        let project_context = self
-            .resolve_project_context(&session_key, conn_id.as_deref())
+        let prepared = self
+            .prepare_prompt_view(&provider, &session_key, conn_id.as_deref(), &params)
             .await;
-
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
-
-        // Check MCP disabled.
-        let mcp_disabled = session_entry
-            .as_ref()
-            .and_then(|entry| entry.mcp_disabled)
-            .unwrap_or(false);
-
-        // Build filtered tool registry.
-        let filtered_registry = {
-            let registry_guard = self.tool_registry.read().await;
-            if tools_enabled {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
-        };
-
-        // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-                persona.memory_text.as_deref(),
-            )
-        };
-
-        let system_prompt_chars = system_prompt.len();
+        let system_prompt_chars = prepared.system_prompt.len();
 
         // Keep raw assistant outputs (including provider/model/token metadata)
         // so the UI can show a debug view of what the LLM actually returned.
@@ -5388,7 +5328,7 @@ impl ChatService for LiveChatService {
         // Build the full messages array: system prompt + conversation history.
         // `values_to_chat_messages` handles `tool_result` → `tool` conversion.
         let mut messages = Vec::with_capacity(1 + history.len());
-        messages.push(ChatMessage::system(system_prompt));
+        messages.push(ChatMessage::system(prepared.system_prompt));
         messages.extend(values_to_chat_messages(&history));
 
         let openai_messages: Vec<Value> = messages.iter().map(|m| m.to_openai_value()).collect();
@@ -11123,6 +11063,107 @@ mod tests {
             matches!(chat_msgs[0], ChatMessage::User { .. }),
             "first ChatMessage after compaction must be User (issue #501)"
         );
+    }
+
+    #[tokio::test]
+    async fn raw_prompt_reports_tool_mode_metadata_from_prepared_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: false,
+                mode: Some(ToolMode::Off),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let raw = service
+            .raw_prompt(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("raw_prompt should succeed");
+
+        assert_eq!(raw["tool_mode"], "Off");
+        assert_eq!(raw["native_tools"], false);
+        assert_eq!(raw["tools_enabled"], false);
+        assert!(raw["toolCount"].as_u64().is_some());
+        assert!(
+            raw["prompt"]
+                .as_str()
+                .is_some_and(|prompt| !prompt.trim().is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_prompt_matches_full_context_system_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        store
+            .append(
+                "main",
+                &serde_json::json!({
+                    "role": "user",
+                    "content": "hello",
+                }),
+            )
+            .await
+            .expect("seed history");
+
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(ToolModeTestProvider {
+                native: false,
+                mode: Some(ToolMode::Text),
+            }),
+        );
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            store,
+            metadata,
+        );
+
+        let raw = service
+            .raw_prompt(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("raw_prompt should succeed");
+        let full = service
+            .full_context(serde_json::json!({ "_session_key": "main" }))
+            .await
+            .expect("full_context should succeed");
+
+        assert_eq!(full["messages"][0]["role"], "system");
+        assert_eq!(full["messages"][0]["content"], raw["prompt"]);
+        assert_eq!(full["systemPromptChars"], raw["charCount"]);
     }
 
     #[test]
