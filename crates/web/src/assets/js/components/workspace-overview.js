@@ -1,8 +1,10 @@
 import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
 import { onEvent } from "../events.js";
-import { sendRpc } from "../helpers.js";
+import { localizedRpcErrorMessage, sendRpc } from "../helpers.js";
 import { sessionStore } from "../stores/session-store.js";
+
+var EXTERNAL_SOURCE_OPTIONS = ["codex", "claude_code", "copilot", "api", "imported"];
 
 function routeLabel(route) {
 	switch (route) {
@@ -149,6 +151,29 @@ function resolveMachineDetails(overview, session, machines) {
 	};
 }
 
+function cloneWorkspaceOverview(overview) {
+	if (!overview) return null;
+	return {
+		...overview,
+		externalActivities: Array.isArray(overview.externalActivities) ? [...overview.externalActivities] : [],
+		externalActivitySummary: {
+			...(overview.externalActivitySummary || {}),
+			sources: { ...(overview.externalActivitySummary?.sources || {}) },
+		},
+		recentSessions: Array.isArray(overview.recentSessions) ? [...overview.recentSessions] : [],
+		coordination: { ...(overview.coordination || {}) },
+		linkedProject: overview.linkedProject
+			? {
+					...overview.linkedProject,
+					preferredMachine: overview.linkedProject.preferredMachine
+						? { ...overview.linkedProject.preferredMachine }
+						: null,
+				}
+			: null,
+		machine: overview.machine ? { ...overview.machine } : null,
+	};
+}
+
 function OverviewBadges({ workspaceLabel, currentRoute, source, preferredMachine, approvalMode }) {
 	return html`
 		<div class="flex flex-wrap items-center gap-2 mb-3">
@@ -286,9 +311,151 @@ function DurableNotesSection({ durableNotes }) {
 	`;
 }
 
-function ExternalActivitiesSection({ activities }) {
+function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey = "", onAttached = null }) {
+	var [showAttachForm, setShowAttachForm] = useState(false);
+	var [source, setSource] = useState("codex");
+	var [title, setTitle] = useState("");
+	var [summary, setSummary] = useState("");
+	var [link, setLink] = useState("");
+	var [saving, setSaving] = useState(false);
+	var [error, setError] = useState("");
+
+	useEffect(() => {
+		setShowAttachForm(false);
+		setSource("codex");
+		setTitle("");
+		setSummary("");
+		setLink("");
+		setSaving(false);
+		setError("");
+	}, [sessionKey]);
+
+	function resetForm() {
+		setSource("codex");
+		setTitle("");
+		setSummary("");
+		setLink("");
+		setError("");
+	}
+
+	function sourceCountBadges() {
+		return Object.entries(summaryCounts)
+			.filter(([, count]) => count > 0)
+			.map(
+				([itemSource, count]) => html`
+				<${InventoryBadge} tone="muted">${sourceLabel(itemSource)}: ${count}</${InventoryBadge}>
+			`,
+			);
+	}
+
+	async function submitAttach(event) {
+		event?.preventDefault?.();
+		if (!sessionKey || saving) return;
+		var trimmedSummary = summary.trim();
+		if (!trimmedSummary) {
+			setError("Summary is required.");
+			return;
+		}
+		setSaving(true);
+		setError("");
+		var result = await sendRpc("sessions.external.attach", {
+			key: sessionKey,
+			source: source,
+			title: title.trim() || null,
+			summary: trimmedSummary,
+			link: link.trim() || null,
+		});
+		setSaving(false);
+		if (!result?.ok) {
+			setError(localizedRpcErrorMessage(result?.error));
+			return;
+		}
+		resetForm();
+		setShowAttachForm(false);
+		onAttached?.(result.payload);
+	}
+
 	return html`
 		<${Section} title="External Activity">
+			<div class="flex flex-wrap items-center justify-between gap-2">
+				<div class="flex flex-wrap gap-1.5">${sourceCountBadges()}</div>
+				<button
+					type="button"
+					class="provider-btn provider-btn-secondary provider-btn-sm"
+					disabled=${saving}
+					onClick=${() => {
+						setShowAttachForm((value) => !value);
+						setError("");
+					}}
+				>
+					${showAttachForm ? "Hide attach form" : "Attach external work"}
+				</button>
+			</div>
+			${
+				showAttachForm &&
+				html`
+					<form class="rounded-lg border border-[var(--border)] bg-[var(--surface2)] p-3 flex flex-col gap-2" onSubmit=${submitAttach}>
+						<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+							<span>Source</span>
+							<select
+								class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+								value=${source}
+								onChange=${(event) => setSource(event.target.value)}
+							>
+								${EXTERNAL_SOURCE_OPTIONS.map(
+									(option) => html`<option value=${option}>${sourceLabel(option)}</option>`,
+								)}
+							</select>
+						</label>
+						<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+							<span>Title</span>
+							<input
+								type="text"
+								class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+								placeholder="Codex review summary"
+								value=${title}
+								onInput=${(event) => setTitle(event.target.value)}
+							/>
+						</label>
+						<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+							<span>Summary</span>
+							<textarea
+								class="min-h-[88px] rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+								placeholder="Summarize what happened outside the Moltis session."
+								value=${summary}
+								onInput=${(event) => setSummary(event.target.value)}
+							></textarea>
+						</label>
+						<label class="flex flex-col gap-1 text-xs text-[var(--muted)]">
+							<span>Link</span>
+							<input
+								type="url"
+								class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)]"
+								placeholder="https://github.com/..."
+								value=${link}
+								onInput=${(event) => setLink(event.target.value)}
+							/>
+						</label>
+						${error && html`<div class="text-xs text-[var(--error)]">${error}</div>`}
+						<div class="flex flex-wrap items-center justify-end gap-2">
+							<button
+								type="button"
+								class="provider-btn provider-btn-secondary provider-btn-sm"
+								disabled=${saving}
+								onClick=${() => {
+									resetForm();
+									setShowAttachForm(false);
+								}}
+							>
+								Cancel
+							</button>
+							<button type="submit" class="provider-btn provider-btn-sm" disabled=${saving || !summary.trim()}>
+								${saving ? "Attaching..." : "Attach"}
+							</button>
+						</div>
+					</form>
+				`
+			}
 			${
 				activities.length > 0
 					? activities.map(
@@ -376,7 +543,7 @@ export function WorkspaceOverview() {
 		Promise.all([sendRpc("sessions.workspace_overview", { key: session.key }), sendRpc("machines.list", {})])
 			.then(([overviewRes, machinesRes]) => {
 				if (cancelled) return;
-				setOverview(overviewRes?.ok ? overviewRes.payload : null);
+				setOverview(overviewRes?.ok ? cloneWorkspaceOverview(overviewRes.payload) : null);
 				setMachines(Array.isArray(machinesRes?.payload) ? machinesRes.payload : []);
 			})
 			.finally(() => {
@@ -407,6 +574,20 @@ export function WorkspaceOverview() {
 	var approvalMode = overview?.approvalMode || "smart";
 	var durableNotes = overview?.memorySummary || coordination.durableNotes || "";
 	var { currentMachine, preferredMachine, preferredMachineId } = resolveMachineDetails(overview, session, machines);
+	var externalActivitySummary = overview?.externalActivitySummary?.sources || {};
+
+	function handleExternalAttached(payload) {
+		if (payload?.workspaceOverview) {
+			setOverview(cloneWorkspaceOverview(payload.workspaceOverview));
+		} else {
+			setRefreshToken((value) => value + 1);
+		}
+		if (payload?.activity?.source && session) {
+			session.externalAgentSource = payload.activity.source;
+			session.dataVersion.value++;
+			sessionStore.notify();
+		}
+	}
 
 	return html`
 		<div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--surface2)]">
@@ -429,7 +610,12 @@ export function WorkspaceOverview() {
 				/>
 				<${CoordinationSection} coordination=${coordination} />
 				<${DurableNotesSection} durableNotes=${durableNotes} />
-				<${ExternalActivitiesSection} activities=${externalActivities} />
+				<${ExternalActivitiesSection}
+					activities=${externalActivities}
+					summaryCounts=${externalActivitySummary}
+					sessionKey=${session.key}
+					onAttached=${handleExternalAttached}
+				/>
 				<${RecentSessionsSection} sessions=${recentSessions} />
 			</div>
 		</div>

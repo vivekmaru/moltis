@@ -129,6 +129,8 @@ Workspace binding now carries a machine default as well:
 The first attach/import workflow is API- and RPC-based instead of editor-plugin
 based:
 
+- the workspace overview includes an **Attach external work** form for quick
+  manual Codex / Claude Code / Copilot / API handoffs
 - `sessions.external.attach` records an external run summary in workspace state
 - `sessions.coordination.set` updates decision/plan/next-action notes
 - `sessions.workspace_overview` returns the combined state used by the UI
@@ -136,6 +138,12 @@ based:
   SSH, and node routes
 - `machines.set_session` makes the session-to-machine binding explicit instead
   of inferring it from legacy route fields
+
+Use the manual attach flow when something important happened outside the Moltis
+web chat but should still become part of the durable workspace record. The
+attached work is kept separate from the live conversation and from durable
+notes, which helps Moltis stay in the coordinator role instead of flattening
+every external run into one chat transcript.
 
 ## Recommended Settings
 
