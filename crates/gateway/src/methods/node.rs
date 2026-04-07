@@ -186,6 +186,72 @@ async fn persist_project_machine_binding(
     }
 }
 
+async fn apply_session_machine_binding(
+    state: &std::sync::Arc<GatewayState>,
+    session_key: &str,
+    machine_id: &str,
+) -> Result<MachineDescriptor, ErrorShape> {
+    let Some(ref meta) = state.services.session_metadata else {
+        return Err(ErrorShape::new(
+            error_codes::UNAVAILABLE,
+            "session metadata not available",
+        ));
+    };
+    meta.upsert(session_key, None)
+        .await
+        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+
+    let machine = match machine_id {
+        LOCAL_MACHINE_ID => {
+            meta.set_node_id(session_key, None)
+                .await
+                .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+            meta.set_sandbox_enabled(session_key, Some(false)).await;
+            if let Some(router) = state.sandbox_router.as_ref() {
+                router.set_override(session_key, false).await;
+            }
+            MachineDescriptor::local()
+        },
+        SANDBOX_MACHINE_ID => {
+            if !crate::machine::sandbox_machine_available(state) {
+                return Err(ErrorShape::new(
+                    error_codes::INVALID_REQUEST,
+                    "sandbox machine is not available",
+                ));
+            }
+            meta.set_node_id(session_key, None)
+                .await
+                .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+            meta.set_sandbox_enabled(session_key, Some(true)).await;
+            if let Some(router) = state.sandbox_router.as_ref() {
+                router.set_override(session_key, true).await;
+            }
+            MachineDescriptor::sandbox(true)
+        },
+        _ => {
+            let resolved = crate::machine::resolve_machine(state, machine_id)
+                .await
+                .ok_or_else(|| {
+                    ErrorShape::new(
+                        error_codes::INVALID_REQUEST,
+                        format!("machine '{machine_id}' not found"),
+                    )
+                })?;
+            meta.set_node_id(session_key, Some(&resolved.id))
+                .await
+                .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+            meta.set_sandbox_enabled(session_key, Some(false)).await;
+            if let Some(router) = state.sandbox_router.as_ref() {
+                router.set_override(session_key, false).await;
+            }
+            resolved
+        },
+    };
+
+    persist_project_machine_binding(state, session_key, &machine.id).await;
+    Ok(machine)
+}
+
 pub(super) fn register(reg: &mut MethodRegistry) {
     reg.register(
         "machines.list",
@@ -244,66 +310,8 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .or_else(|| ctx.params.get("machine_id"))
                     .and_then(|value| value.as_str())
                     .unwrap_or(LOCAL_MACHINE_ID);
-
-                let Some(ref meta) = ctx.state.services.session_metadata else {
-                    return Err(ErrorShape::new(
-                        error_codes::UNAVAILABLE,
-                        "session metadata not available",
-                    ));
-                };
-                meta.upsert(session_key, None)
-                    .await
-                    .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
-
-                let machine = match machine_id {
-                    LOCAL_MACHINE_ID => {
-                        meta.set_node_id(session_key, None).await.map_err(|e| {
-                            ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
-                        })?;
-                        meta.set_sandbox_enabled(session_key, Some(false)).await;
-                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
-                            router.set_override(session_key, false).await;
-                        }
-                        MachineDescriptor::local()
-                    },
-                    SANDBOX_MACHINE_ID => {
-                        if !crate::machine::sandbox_machine_available(&ctx.state) {
-                            return Err(ErrorShape::new(
-                                error_codes::INVALID_REQUEST,
-                                "sandbox machine is not available",
-                            ));
-                        }
-                        meta.set_node_id(session_key, None).await.map_err(|e| {
-                            ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
-                        })?;
-                        meta.set_sandbox_enabled(session_key, Some(true)).await;
-                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
-                            router.set_override(session_key, true).await;
-                        }
-                        MachineDescriptor::sandbox(true)
-                    },
-                    _ => {
-                        let resolved = crate::machine::resolve_machine(&ctx.state, machine_id)
-                            .await
-                            .ok_or_else(|| {
-                                ErrorShape::new(
-                                    error_codes::INVALID_REQUEST,
-                                    format!("machine '{machine_id}' not found"),
-                                )
-                            })?;
-                        meta.set_node_id(session_key, Some(&resolved.id))
-                            .await
-                            .map_err(|e| {
-                                ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
-                            })?;
-                        meta.set_sandbox_enabled(session_key, Some(false)).await;
-                        if let Some(router) = ctx.state.sandbox_router.as_ref() {
-                            router.set_override(session_key, false).await;
-                        }
-                        resolved
-                    },
-                };
-                persist_project_machine_binding(&ctx.state, session_key, &machine.id).await;
+                let machine =
+                    apply_session_machine_binding(&ctx.state, session_key, machine_id).await?;
 
                 broadcast(
                     &ctx.state,
@@ -541,30 +549,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 } else {
                     None
                 };
-
-                let Some(ref meta) = ctx.state.services.session_metadata else {
-                    return Err(ErrorShape::new(
-                        error_codes::UNAVAILABLE,
-                        "session metadata not available",
-                    ));
-                };
-                meta.upsert(session_key, None)
-                    .await
-                    .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
-                meta.set_node_id(session_key, resolved_node_id.as_deref())
-                    .await
-                    .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
-                meta.set_sandbox_enabled(session_key, Some(false)).await;
-                persist_project_machine_binding(
+                let machine = apply_session_machine_binding(
                     &ctx.state,
                     session_key,
                     resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
                 )
-                .await;
-                let machine = crate::machine::session_binding_from_machine_id(
-                    resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
-                    crate::machine::sandbox_machine_available(&ctx.state),
-                );
+                .await?;
                 let mut payload =
                     serde_json::Map::from_iter([("ok".to_string(), serde_json::Value::Bool(true))]);
                 payload.extend(crate::machine::session_contract_fields(&machine));
