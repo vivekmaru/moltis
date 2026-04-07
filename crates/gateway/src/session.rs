@@ -1138,38 +1138,25 @@ impl LiveSessionService {
             .map(str::trim)
             .filter(|machine_id| !machine_id.is_empty())
             .unwrap_or(crate::machine::LOCAL_MACHINE_ID);
+        let machine = crate::machine::session_binding_from_machine_id(
+            normalized_machine_id,
+            self.sandbox_router
+                .as_ref()
+                .is_some_and(|router| router.backend().is_real()),
+        );
+        let legacy_binding = crate::machine::legacy_session_binding(&machine);
 
-        match normalized_machine_id {
-            crate::machine::LOCAL_MACHINE_ID => {
-                let _ = self.metadata.set_node_id(session_key, None).await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(false))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, false).await;
-                }
-            },
-            crate::machine::SANDBOX_MACHINE_ID => {
-                let _ = self.metadata.set_node_id(session_key, None).await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(true))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, true).await;
-                }
-            },
-            _ => {
-                let _ = self
-                    .metadata
-                    .set_node_id(session_key, Some(normalized_machine_id))
-                    .await;
-                self.metadata
-                    .set_sandbox_enabled(session_key, Some(false))
-                    .await;
-                if let Some(ref router) = self.sandbox_router {
-                    router.set_override(session_key, false).await;
-                }
-            },
+        let _ = self
+            .metadata
+            .set_node_id(session_key, legacy_binding.node_id.as_deref())
+            .await;
+        self.metadata
+            .set_sandbox_enabled(session_key, Some(legacy_binding.sandbox_enabled))
+            .await;
+        if let Some(ref router) = self.sandbox_router {
+            router
+                .set_override(session_key, legacy_binding.sandbox_enabled)
+                .await;
         }
     }
 
