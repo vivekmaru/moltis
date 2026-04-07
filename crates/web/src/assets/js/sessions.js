@@ -32,6 +32,7 @@ import { updateSessionProjectSelect } from "./project-combo.js";
 import { currentPrefix, navigate, sessionPath } from "./router.js";
 import { settingsPath } from "./routes.js";
 import { updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
+import { resolveSessionExecutionRoute, resolveSessionMachineId } from "./session-machine.js";
 import * as S from "./state.js";
 import { modelStore } from "./stores/model-store.js";
 import { projectStore } from "./stores/project-store.js";
@@ -72,24 +73,6 @@ function truncateSessionPreview(text) {
 	var chars = Array.from(trimmed);
 	if (chars.length <= SESSION_PREVIEW_MAX_CHARS) return trimmed;
 	return `${chars.slice(0, SESSION_PREVIEW_MAX_CHARS).join("")}…`;
-}
-
-function restoredExecutionRoute(entry) {
-	if (entry?.machine?.executionRoute) return entry.machine.executionRoute;
-	if (entry?.machine?.route) return entry.machine.route;
-	if (entry?.executionRoute) return entry.executionRoute;
-	if (entry?.node_id) {
-		return String(entry.node_id).startsWith("ssh:") ? "ssh" : "node";
-	}
-	return entry?.sandbox_enabled === true ? "sandbox" : "local";
-}
-
-function restoredMachineId(entry, route) {
-	if (entry?.machine?.id) return entry.machine.id;
-	if (route === "sandbox") return "sandbox";
-	if (route === "local") return "local";
-	if (entry?.node_id) return entry.node_id;
-	return entry?.sandbox_enabled === true ? "sandbox" : "local";
 }
 
 // ── Fetch & render ──────────────────────────────────────────
@@ -627,7 +610,7 @@ function restoreSessionState(entry, projectId) {
 		var found = modelStore.getById(entry.model);
 		if (S.modelComboLabel) S.modelComboLabel.textContent = found ? found.displayName || found.id : entry.model;
 	}
-	var restoredRoute = restoredExecutionRoute(entry);
+	var restoredRoute = resolveSessionExecutionRoute(entry);
 	var restoredSandboxRoute = restoredRoute === "sandbox";
 	updateSandboxUI(restoredSandboxRoute);
 	updateSandboxImageUI(entry.sandbox_image || null);
@@ -637,7 +620,7 @@ function restoreSessionState(entry, projectId) {
 	S.setSessionExecPromptSymbol(effectiveSandboxRoute || S.hostExecIsRoot ? "#" : "$");
 	updateCommandInputUI();
 	restoreMcpToggle(!entry.mcpDisabled);
-	restoreMachineSelection(restoredMachineId(entry, restoredRoute));
+	restoreMachineSelection(resolveSessionMachineId(entry, restoredRoute));
 	updateChatSessionHeader();
 }
 

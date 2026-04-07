@@ -3,6 +3,7 @@
 import { updateCommandInputUI, updateTokenBar } from "./chat-ui.js";
 import { sendRpc } from "./helpers.js";
 import { t } from "./i18n.js";
+import { resolveSessionExecutionRoute } from "./session-machine.js";
 import * as S from "./state.js";
 
 var SANDBOX_DISABLED_HINT = () => t("chat:sandboxDisabledHint");
@@ -97,7 +98,7 @@ export function bindSandboxToggleEvents() {
 			sandboxEnabled: newVal,
 		}).then((res) => {
 			if (res?.result) {
-				updateSandboxUI(res.result.sandbox_enabled);
+				updateSandboxUI(resolveSessionExecutionRoute(res.result) === "sandbox");
 			} else {
 				updateSandboxUI(newVal);
 			}
