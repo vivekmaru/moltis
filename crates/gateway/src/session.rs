@@ -1092,15 +1092,12 @@ impl LiveSessionService {
     }
 
     async fn effective_execution_route(&self, entry: &SessionEntry) -> ExecutionRoute {
-        let sandbox_active = if let Some(ref router) = self.sandbox_router {
-            if router.is_sandboxed(&entry.key).await {
-                true
-            } else {
-                entry.sandbox_enabled == Some(true)
-            }
-        } else {
-            entry.sandbox_enabled == Some(true)
-        };
+        let sandbox_active = crate::machine::effective_session_sandbox_active(
+            self.sandbox_router.as_ref(),
+            &entry.key,
+            entry,
+        )
+        .await;
 
         execution_route_for_machine_kind(crate::machine::session_machine_kind(
             entry,
