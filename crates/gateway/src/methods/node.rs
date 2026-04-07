@@ -554,13 +554,21 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 meta.set_node_id(session_key, resolved_node_id.as_deref())
                     .await
                     .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                meta.set_sandbox_enabled(session_key, Some(false)).await;
                 persist_project_machine_binding(
                     &ctx.state,
                     session_key,
                     resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
                 )
                 .await;
-                Ok(serde_json::json!({ "ok": true, "node_id": resolved_node_id }))
+                let machine = crate::machine::session_binding_from_machine_id(
+                    resolved_node_id.as_deref().unwrap_or(LOCAL_MACHINE_ID),
+                    crate::machine::sandbox_machine_available(&ctx.state),
+                );
+                let mut payload =
+                    serde_json::Map::from_iter([("ok".to_string(), serde_json::Value::Bool(true))]);
+                payload.extend(crate::machine::session_contract_fields(&machine));
+                Ok(serde_json::Value::Object(payload))
             })
         }),
     );
@@ -1168,5 +1176,47 @@ mod tests {
             .expect("get project")
             .expect("project");
         assert_eq!(project.preferred_machine_id.as_deref(), Some("node-ops"));
+    }
+
+    #[tokio::test]
+    async fn nodes_set_session_clears_sandbox_override_and_returns_machine_contract() {
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.expect("upsert session");
+        metadata.set_sandbox_enabled("main", Some(true)).await;
+
+        let state = test_state(Arc::clone(&metadata), None);
+        {
+            let mut inner = state.inner.write().await;
+            inner.nodes.register(test_node("node-build", "Build box"));
+        }
+
+        let reg = MethodRegistry::new();
+        let response = reg
+            .dispatch(MethodContext {
+                request_id: "req-4".into(),
+                method: "nodes.set_session".into(),
+                params: serde_json::json!({
+                    "session_key": "main",
+                    "node_id": "node-build",
+                }),
+                client_conn_id: "conn-1".into(),
+                client_role: "operator".into(),
+                client_scopes: operator_scopes("operator.write"),
+                state,
+                channel: None,
+            })
+            .await;
+
+        assert!(response.ok, "nodes.set_session should succeed");
+        let payload = response.payload.expect("nodes.set_session payload");
+        assert_eq!(payload["executionRoute"], "node");
+        assert_eq!(payload["machine"]["id"], "node-build");
+        assert_eq!(payload["node_id"], "node-build");
+        assert_eq!(payload["sandbox_enabled"], false);
+
+        let entry = metadata.get("main").await.expect("session metadata");
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
     }
 }

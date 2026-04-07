@@ -1665,6 +1665,10 @@ impl SessionService for LiveSessionService {
                     .await;
             }
         }
+        if let Some(machine_id_opt) = p.machine_id {
+            let machine_id = machine_id_opt.filter(|machine_id| !machine_id.trim().is_empty());
+            self.apply_machine_binding(key, machine_id.as_deref()).await;
+        }
         if let Some(worktree_branch_opt) = p.worktree_branch {
             let worktree_branch = worktree_branch_opt.filter(|s| !s.is_empty());
             self.metadata
@@ -3597,6 +3601,67 @@ mod tests {
         assert_eq!(entry.project_id.as_deref(), Some("ops"));
         assert_eq!(entry.sandbox_enabled, Some(true));
         assert_eq!(entry.node_id, None);
+    }
+
+    #[tokio::test]
+    async fn patch_machine_id_updates_session_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "machineId": "node-build",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-build");
+        assert_eq!(result["node_id"], "node-build");
+        assert_eq!(result["sandbox_enabled"], false);
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn patch_machine_id_overrides_workspace_preferred_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
+        let project_store: Arc<dyn ProjectStore> = Arc::new(SqliteProjectStore::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+
+        let mut project = new_project("ops".into(), "Ops".into(), "/tmp/ops".into());
+        project.preferred_machine_id = Some(crate::machine::SANDBOX_MACHINE_ID.to_string());
+        project_store.upsert(project).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_project_store(Arc::clone(&project_store));
+        let result = svc
+            .patch(serde_json::json!({
+                "key": "main",
+                "projectId": "ops",
+                "machineId": "node-build",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["workspace"], "ops");
+        assert_eq!(result["executionRoute"], "node");
+        assert_eq!(result["machine"]["id"], "node-build");
+
+        let entry = metadata.get("main").await.unwrap();
+        assert_eq!(entry.project_id.as_deref(), Some("ops"));
+        assert_eq!(entry.node_id.as_deref(), Some("node-build"));
+        assert_eq!(entry.sandbox_enabled, Some(false));
     }
 
     #[tokio::test]

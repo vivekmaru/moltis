@@ -35,6 +35,8 @@ pub struct PatchParams {
     pub sandbox_image: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option", alias = "mcp_disabled")]
     pub mcp_disabled: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option", alias = "machine_id")]
+    pub machine_id: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option", alias = "sandbox_enabled")]
     pub sandbox_enabled: Option<Option<bool>>,
     #[serde(
@@ -175,6 +177,7 @@ mod tests {
         assert!(p.label.is_none());
         assert!(p.model.is_none());
         assert!(p.project_id.is_none());
+        assert!(p.machine_id.is_none());
         assert!(p.sandbox_enabled.is_none());
     }
 
@@ -184,12 +187,14 @@ mod tests {
             "key": "main",
             "label": "My Chat",
             "model": "gpt-4o",
+            "machineId": "sandbox",
             "sandboxEnabled": true,
             "mcpDisabled": false,
         }))
         .unwrap();
         assert_eq!(p.label.as_deref(), Some("My Chat"));
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(p.machine_id, Some(Some("sandbox".to_string())));
         assert_eq!(p.sandbox_enabled, Some(Some(true)));
         assert_eq!(p.mcp_disabled, Some(Some(false)));
         assert!(p.external_agent_source.is_none());
@@ -222,6 +227,7 @@ mod tests {
             "project_id": "proj-1",
             "worktree_branch": "feature/abc",
             "sandbox_image": "custom:latest",
+            "machine_id": "node-build",
             "sandbox_enabled": false,
             "mcp_disabled": true,
             "external_agent_source": "codex",
@@ -230,12 +236,23 @@ mod tests {
         assert_eq!(p.project_id, Some(Some("proj-1".to_string())));
         assert_eq!(p.worktree_branch, Some(Some("feature/abc".to_string())));
         assert_eq!(p.sandbox_image, Some(Some("custom:latest".to_string())));
+        assert_eq!(p.machine_id, Some(Some("node-build".to_string())));
         assert_eq!(p.sandbox_enabled, Some(Some(false)));
         assert_eq!(p.mcp_disabled, Some(Some(true)));
         assert_eq!(
             p.external_agent_source,
             Some(Some(ExternalAgentSource::Codex))
         );
+    }
+
+    #[test]
+    fn patch_params_machine_id_null_clears() {
+        let p: PatchParams = serde_json::from_value(json!({
+            "key": "main",
+            "machineId": null,
+        }))
+        .unwrap();
+        assert_eq!(p.machine_id, Some(None));
     }
 
     #[test]
