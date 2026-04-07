@@ -248,6 +248,115 @@ test.describe("Chat input and slash commands", () => {
 		await expect(tokenBar).not.toContainText("/sh mode");
 	});
 
+	test("/context shows normalized route, machine, and source labels", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const stateModule = await import(`${prefix}js/state.js`);
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function resolveRpc(parsed, responsePayload) {
+				const responder = stateModule.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete stateModule.pending[parsed.id];
+				}
+				return undefined;
+			}
+
+			if (!window.__origContextWsSend) {
+				window.__origContextWsSend = stateModule.ws.send.bind(stateModule.ws);
+			}
+
+			stateModule.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__origContextWsSend(payload);
+				if (parsed.method === "chat.context") {
+					return resolveRpc(parsed, {
+						supportsTools: true,
+						session: {
+							key: "main",
+							messageCount: 3,
+							model: "test-model",
+							provider: "test-provider",
+							label: "Main",
+							workspace: "lab",
+							surface: "web",
+							executionRoute: "ssh",
+							machine: {
+								id: "ssh:prod-host",
+								label: "SSH target",
+								trustState: "managed_remote",
+							},
+							externalAgentSource: "claude_code",
+						},
+						project: null,
+						workspaceOverview: {
+							workspaceId: "lab",
+							recentSessions: [
+								{
+									key: "session:abc",
+									label: "Deploy",
+									executionRoute: "ssh",
+									externalAgentSource: "codex",
+									machine: {
+										id: "ssh:prod-host",
+										label: "SSH target",
+									},
+								},
+							],
+							coordination: {},
+							externalActivities: [],
+						},
+						skills: [],
+						mcpServers: [],
+						tools: [],
+						sandbox: {},
+						execution: {
+							mode: "host",
+							route: "ssh",
+							hostIsRoot: false,
+							isRoot: false,
+							promptSymbol: "$",
+						},
+						tokenUsage: {},
+					});
+				}
+				return window.__origContextWsSend(payload);
+			};
+		});
+
+		const chatInput = page.locator("#chatInput");
+		await chatInput.fill("/context");
+		await chatInput.press("Enter");
+
+		const contextCard = page.locator(".ctx-card").last();
+		await expect(contextCard).toBeVisible({ timeout: 10_000 });
+		await expect(contextCard).toContainText("Execution route");
+		await expect(contextCard).toContainText("SSH");
+		await expect(contextCard).toContainText("Machine");
+		await expect(contextCard).toContainText("ssh:prod-host");
+		await expect(contextCard).toContainText("Trust");
+		await expect(contextCard).toContainText("Managed Remote");
+		await expect(contextCard).toContainText("Source");
+		await expect(contextCard).toContainText("Claude Code");
+		await expect(contextCard).toContainText("Recent Sessions");
+		await expect(contextCard).toContainText("SSH · ssh:prod-host · Codex");
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("command mode prefixes outgoing user message with /sh", async ({ page }) => {
 		await page.evaluate(() => {
 			window.__chatSendPayloads = [];

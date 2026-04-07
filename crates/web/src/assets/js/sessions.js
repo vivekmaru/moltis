@@ -74,6 +74,24 @@ function truncateSessionPreview(text) {
 	return `${chars.slice(0, SESSION_PREVIEW_MAX_CHARS).join("")}…`;
 }
 
+function restoredExecutionRoute(entry) {
+	if (entry?.machine?.executionRoute) return entry.machine.executionRoute;
+	if (entry?.machine?.route) return entry.machine.route;
+	if (entry?.executionRoute) return entry.executionRoute;
+	if (entry?.node_id) {
+		return String(entry.node_id).startsWith("ssh:") ? "ssh" : "node";
+	}
+	return entry?.sandbox_enabled === true ? "sandbox" : "local";
+}
+
+function restoredMachineId(entry, route) {
+	if (entry?.machine?.id) return entry.machine.id;
+	if (route === "sandbox") return "sandbox";
+	if (route === "local") return "local";
+	if (entry?.node_id) return entry.node_id;
+	return entry?.sandbox_enabled === true ? "sandbox" : "local";
+}
+
 // ── Fetch & render ──────────────────────────────────────────
 
 export function fetchSessions() {
@@ -609,13 +627,8 @@ function restoreSessionState(entry, projectId) {
 		var found = modelStore.getById(entry.model);
 		if (S.modelComboLabel) S.modelComboLabel.textContent = found ? found.displayName || found.id : entry.model;
 	}
-	var restoredExecutionRoute =
-		entry.machine?.executionRoute ||
-		entry.machine?.route ||
-		entry.executionRoute ||
-		(entry.node_id ? (String(entry.node_id).startsWith("ssh:") ? "ssh" : "node") : null) ||
-		(entry.sandbox_enabled === true ? "sandbox" : "local");
-	var restoredSandboxRoute = restoredExecutionRoute === "sandbox";
+	var restoredRoute = restoredExecutionRoute(entry);
+	var restoredSandboxRoute = restoredRoute === "sandbox";
 	updateSandboxUI(restoredSandboxRoute);
 	updateSandboxImageUI(entry.sandbox_image || null);
 	var sandboxRuntimeAvailable = (S.sandboxInfo?.backend || "none") !== "none";
@@ -624,13 +637,7 @@ function restoreSessionState(entry, projectId) {
 	S.setSessionExecPromptSymbol(effectiveSandboxRoute || S.hostExecIsRoot ? "#" : "$");
 	updateCommandInputUI();
 	restoreMcpToggle(!entry.mcpDisabled);
-	var restoredMachineId =
-		entry.machine?.id ||
-		(restoredExecutionRoute === "sandbox" ? "sandbox" : null) ||
-		(restoredExecutionRoute === "local" ? "local" : null) ||
-		entry.node_id ||
-		(entry.sandbox_enabled === true ? "sandbox" : "local");
-	restoreMachineSelection(restoredMachineId);
+	restoreMachineSelection(restoredMachineId(entry, restoredRoute));
 	updateChatSessionHeader();
 }
 
