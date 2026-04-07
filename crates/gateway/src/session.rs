@@ -1241,14 +1241,14 @@ impl LiveSessionService {
             .collect()
     }
 
-    async fn machine_payload_with_inventory(
+    async fn machine_descriptor_with_inventory(
         &self,
         route: ExecutionRoute,
         entry: &SessionEntry,
         inventory: Option<&crate::machine::MachineInventorySnapshot>,
-    ) -> Value {
+    ) -> crate::machine::MachineDescriptor {
         let sandbox_active = route == ExecutionRoute::Sandbox;
-        let machine = if let Some(inventory) = inventory {
+        if let Some(inventory) = inventory {
             crate::machine::live_session_machine_descriptor_for_inventory(
                 inventory,
                 entry,
@@ -1260,8 +1260,7 @@ impl LiveSessionService {
             let sandbox_available =
                 crate::machine::sandbox_router_available(self.sandbox_router.as_ref());
             crate::machine::session_machine_descriptor(entry, sandbox_active, sandbox_available)
-        };
-        serde_json::to_value(machine).unwrap_or(Value::Null)
+        }
     }
 
     async fn present_session_entry(
@@ -1276,6 +1275,10 @@ impl LiveSessionService {
         let execution_route = self.effective_execution_route(entry).await;
         let workspace_label = self.workspace_label(entry.project_id.as_deref()).await;
         let external_source = normalize_session_source(entry.external_agent_source);
+        let machine = self
+            .machine_descriptor_with_inventory(execution_route, entry, inventory)
+            .await;
+        let legacy_binding = crate::machine::legacy_session_binding(&machine);
 
         serde_json::json!({
             "id": entry.id,
@@ -1289,7 +1292,7 @@ impl LiveSessionService {
             "projectId": entry.project_id,
             "workspace": entry.project_id,
             "workspaceLabel": workspace_label,
-            "sandbox_enabled": entry.sandbox_enabled,
+            "sandbox_enabled": legacy_binding.sandbox_enabled,
             "sandbox_image": entry.sandbox_image,
             "worktree_branch": entry.worktree_branch,
             "channelBinding": entry.channel_binding,
@@ -1301,13 +1304,11 @@ impl LiveSessionService {
             "archived": entry.archived,
             "agent_id": agent_id.clone(),
             "agentId": agent_id,
-            "node_id": entry.node_id,
+            "node_id": legacy_binding.node_id,
             "surface": surface.surface,
             "sessionKind": surface.session_kind.as_str(),
             "executionRoute": execution_route.as_str(),
-            "machine": self
-                .machine_payload_with_inventory(execution_route, entry, inventory)
-                .await,
+            "machine": serde_json::to_value(machine).unwrap_or(Value::Null),
             "externalAgentSource": external_source.as_str(),
             "version": entry.version,
         })
@@ -1360,7 +1361,7 @@ impl LiveSessionService {
             {
                 let route = self.effective_execution_route(&recent).await;
                 let machine = self
-                    .machine_payload_with_inventory(route, &recent, machine_inventory.as_ref())
+                    .machine_descriptor_with_inventory(route, &recent, machine_inventory.as_ref())
                     .await;
                 items.push(serde_json::json!({
                     "key": recent.key,
@@ -1368,7 +1369,7 @@ impl LiveSessionService {
                     "updatedAt": recent.updated_at,
                     "messageCount": recent.message_count,
                     "executionRoute": route.as_str(),
-                    "machine": machine,
+                    "machine": serde_json::to_value(machine).unwrap_or(Value::Null),
                     "externalAgentSource": normalize_session_source(recent.external_agent_source).as_str(),
                 }));
             }
@@ -1393,9 +1394,11 @@ impl LiveSessionService {
             "linkedProject": linked_project,
             "currentBranch": entry.worktree_branch,
             "currentExecutionRoute": execution_route.as_str(),
-            "machine": self
-                .machine_payload_with_inventory(execution_route, entry, machine_inventory.as_ref())
-                .await,
+            "machine": serde_json::to_value(
+                self.machine_descriptor_with_inventory(execution_route, entry, machine_inventory.as_ref())
+                    .await,
+            )
+            .unwrap_or(Value::Null),
             "approvalMode": approval_mode,
             "coordination": Self::coordination_payload(&coordination),
             "memorySummary": coordination.durable_notes,
