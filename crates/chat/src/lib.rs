@@ -1185,7 +1185,7 @@ fn machine_payload(
     route: ExecutionRoute,
     session_entry: Option<&SessionEntry>,
     sandbox_available: bool,
-    connected_node_ids: Option<&HashSet<String>>,
+    connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> Value {
     let node_id = session_entry.and_then(|entry| entry.node_id.as_deref());
     match route {
@@ -1211,35 +1211,49 @@ fn machine_payload(
             "health": if sandbox_available { "ready" } else { "unavailable" },
             "available": sandbox_available,
         }),
-        ExecutionRoute::Ssh => serde_json::json!({
-            "id": node_id.unwrap_or("ssh:unresolved"),
-            "kind": "ssh",
-            "route": "ssh",
-            "executionRoute": "ssh",
-            "label": "SSH target",
-            "nodeId": node_id,
-            "trustState": "managed_ssh",
-            "health": if node_id.is_some() { "ready" } else { "unavailable" },
-            "available": node_id.is_some(),
-        }),
-        ExecutionRoute::Node => serde_json::json!({
-            "id": node_id.unwrap_or("node:unresolved"),
-            "kind": "node",
-            "route": "node",
-            "executionRoute": "node",
-            "label": "Paired node",
-            "nodeId": node_id,
-            "trustState": "paired_node",
-            "health": if node_id
-                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id)))
-            {
-                "ready"
-            } else {
+        ExecutionRoute::Ssh => {
+            serde_json::json!({
+                "id": node_id.unwrap_or("ssh:unresolved"),
+                "kind": "ssh",
+                "route": "ssh",
+                "executionRoute": "ssh",
+                "label": "SSH target",
+                "nodeId": node_id,
+                "trustState": "managed_ssh",
+                "health": if node_id.is_some() { "ready" } else { "unavailable" },
+                "available": node_id.is_some(),
+            })
+        },
+        ExecutionRoute::Node => {
+            let connected_node = node_id.and_then(|id| {
+                connected_nodes.and_then(|nodes| nodes.iter().find(|node| node.node_id == id))
+            });
+            let node_available = node_id.is_some_and(|id| {
+                connected_nodes.is_none_or(|nodes| nodes.iter().any(|node| node.node_id == id))
+            });
+            let node_label = connected_node
+                .and_then(|node| node.display_name.as_deref())
+                .or(node_id)
+                .unwrap_or("Paired node");
+            let node_health = if !node_available {
                 "unavailable"
-            },
-            "available": node_id
-                .is_some_and(|id| connected_node_ids.is_none_or(|ids| ids.contains(id))),
-        }),
+            } else if connected_node.is_some_and(|node| node.telemetry_stale) {
+                "degraded"
+            } else {
+                "ready"
+            };
+            serde_json::json!({
+                "id": node_id.unwrap_or("node:unresolved"),
+                "kind": "node",
+                "route": "node",
+                "executionRoute": "node",
+                "label": node_label,
+                "nodeId": node_id,
+                "trustState": "paired_node",
+                "health": node_health,
+                "available": node_available,
+            })
+        },
     }
 }
 
@@ -1262,17 +1276,11 @@ async fn resolve_execution_context_with_connected_nodes(
     connected_nodes: Option<&[runtime::ConnectedNodeSummary]>,
 ) -> ResolvedExecutionContext {
     let route = effective_execution_route(state, session_key, session_entry).await;
-    let connected_node_ids = connected_nodes.map(|nodes| {
-        nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<HashSet<_>>()
-    });
     let machine = machine_payload(
         route,
         session_entry,
         sandbox_machine_available(state),
-        connected_node_ids.as_ref(),
+        connected_nodes,
     );
     ResolvedExecutionContext { route, machine }
 }
@@ -9750,6 +9758,30 @@ mod tests {
         let runtime = mock_runtime();
         let mut entry = make_session_entry_with_binding(None);
         entry.key = "worker".to_string();
+        entry.node_id = Some("node:ready".to_string());
+
+        let connected_nodes = vec![connected_node_summary("node:ready")];
+        let execution_context = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        let summary = recent_session_summary_payload(&entry, &execution_context);
+        assert_eq!(summary["executionRoute"], "node");
+        assert_eq!(summary["machine"]["id"], "node:ready");
+        assert_eq!(summary["machine"]["label"], "node:ready");
+        assert_eq!(summary["machine"]["available"], true);
+        assert_eq!(summary["machine"]["health"], "ready");
+    }
+
+    #[tokio::test]
+    async fn recent_session_summary_payload_marks_missing_node_unavailable() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = "worker".to_string();
         entry.node_id = Some("node:missing".to_string());
 
         let connected_nodes = vec![connected_node_summary("node:other")];
@@ -9824,6 +9856,19 @@ mod tests {
         }
     }
 
+    fn connected_node_summary_with_display_name(
+        node_id: &str,
+        display_name: &str,
+        telemetry_stale: bool,
+    ) -> runtime::ConnectedNodeSummary {
+        runtime::ConnectedNodeSummary {
+            node_id: node_id.to_string(),
+            display_name: Some(display_name.to_string()),
+            telemetry_stale,
+            ..connected_node_summary(node_id)
+        }
+    }
+
     #[tokio::test]
     async fn resolve_execution_context_marks_disconnected_node_unavailable() {
         let runtime = mock_runtime();
@@ -9866,6 +9911,55 @@ mod tests {
         assert_eq!(resolved.machine["id"], "node:ready");
         assert_eq!(resolved.machine["available"], true);
         assert_eq!(resolved.machine["health"], "ready");
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_uses_connected_node_display_name() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:builder".to_string());
+
+        let connected_nodes = vec![connected_node_summary_with_display_name(
+            "node:builder",
+            "Build box",
+            false,
+        )];
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.machine["id"], "node:builder");
+        assert_eq!(resolved.machine["label"], "Build box");
+        assert_eq!(resolved.machine["health"], "ready");
+    }
+
+    #[tokio::test]
+    async fn resolve_execution_context_marks_stale_connected_node_degraded() {
+        let runtime = mock_runtime();
+        let mut entry = make_session_entry_with_binding(None);
+        entry.node_id = Some("node:stale".to_string());
+
+        let connected_nodes = vec![connected_node_summary_with_display_name(
+            "node:stale",
+            "Stale box",
+            true,
+        )];
+        let resolved = resolve_execution_context_with_connected_nodes(
+            &runtime,
+            &entry.key,
+            Some(&entry),
+            Some(&connected_nodes),
+        )
+        .await;
+
+        assert_eq!(resolved.machine["id"], "node:stale");
+        assert_eq!(resolved.machine["label"], "Stale box");
+        assert_eq!(resolved.machine["available"], true);
+        assert_eq!(resolved.machine["health"], "degraded");
     }
 
     #[tokio::test]
