@@ -1173,6 +1173,17 @@ impl LiveSessionService {
             .await;
     }
 
+    fn inherited_machine_binding<'a>(
+        parent: &'a SessionEntry,
+        parent_machine_id: &'a str,
+    ) -> Option<&'a str> {
+        if parent.node_id.is_some() || parent.sandbox_enabled.is_some() {
+            Some(parent_machine_id)
+        } else {
+            None
+        }
+    }
+
     fn preferred_machine_payload(machine_id: Option<&str>, sandbox_available: bool) -> Value {
         let Some(machine_id) = machine_id else {
             return Value::Null;
@@ -2310,12 +2321,14 @@ impl SessionService for LiveSessionService {
             let parent_machine = self
                 .machine_descriptor_with_inventory(parent_route, &parent, None)
                 .await;
+            let inherited_machine_id =
+                Self::inherited_machine_binding(&parent, &parent_machine.id).map(str::to_owned);
             if parent.model.is_some() {
                 self.metadata.set_model(&new_key, parent.model).await;
             }
             if parent.project_id.is_some() {
                 self.metadata
-                    .set_project_id(&new_key, parent.project_id)
+                    .set_project_id(&new_key, parent.project_id.clone())
                     .await;
             }
             if parent.mcp_disabled.is_some() {
@@ -2327,8 +2340,9 @@ impl SessionService for LiveSessionService {
                 .metadata
                 .set_agent_id(&new_key, Some(&parent_agent))
                 .await;
-            self.apply_machine_binding(&new_key, Some(&parent_machine.id))
-                .await;
+            if let Some(machine_id) = inherited_machine_id.as_deref() {
+                self.apply_machine_binding(&new_key, Some(machine_id)).await;
+            }
             if parent.external_agent_source.is_some() {
                 let _ = self
                     .metadata
@@ -3360,6 +3374,16 @@ mod tests {
         pool
     }
 
+    fn sandbox_router_with_mode(mode: moltis_tools::sandbox::SandboxMode) -> Arc<SandboxRouter> {
+        let config = moltis_tools::sandbox::SandboxConfig {
+            mode,
+            ..Default::default()
+        };
+        let backend: Arc<dyn moltis_tools::sandbox::Sandbox> =
+            Arc::new(moltis_tools::sandbox::DockerSandbox::new(config.clone()));
+        Arc::new(SandboxRouter::with_backend(config, backend))
+    }
+
     #[tokio::test]
     async fn with_browser_service_builder() {
         let dir = tempfile::tempdir().unwrap();
@@ -3723,6 +3747,71 @@ mod tests {
         assert_eq!(entry.sandbox_enabled, Some(false));
         assert_eq!(result["executionRoute"], "node");
         assert_eq!(result["machine"]["id"], "node-builder");
+    }
+
+    #[tokio::test]
+    async fn fork_from_main_keeps_non_main_sandbox_policy_without_explicit_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let sandbox_router = sandbox_router_with_mode(moltis_tools::sandbox::SandboxMode::NonMain);
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata))
+            .with_sandbox_router(Arc::clone(&sandbox_router));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, None);
+        assert_eq!(entry.node_id, None);
+        assert!(sandbox_router.is_sandboxed(session_key).await);
+        assert_eq!(result["executionRoute"], "sandbox");
+        assert_eq!(result["machine"]["id"], crate::machine::SANDBOX_MACHINE_ID);
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_explicit_local_override_under_non_main_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata.upsert("main", None).await.unwrap();
+        metadata.set_sandbox_enabled("main", Some(false)).await;
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .unwrap();
+
+        let sandbox_router = sandbox_router_with_mode(moltis_tools::sandbox::SandboxMode::NonMain);
+        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata))
+            .with_sandbox_router(Arc::clone(&sandbox_router));
+        let result = svc
+            .fork(serde_json::json!({ "key": "main" }))
+            .await
+            .unwrap();
+
+        let session_key = result["sessionKey"].as_str().unwrap();
+        let entry = metadata.get(session_key).await.unwrap();
+        assert_eq!(entry.sandbox_enabled, Some(false));
+        assert_eq!(entry.node_id, None);
+        assert!(!sandbox_router.is_sandboxed(session_key).await);
+        assert_eq!(result["executionRoute"], "local");
+        assert_eq!(result["machine"]["id"], crate::machine::LOCAL_MACHINE_ID);
     }
 
     #[tokio::test]
