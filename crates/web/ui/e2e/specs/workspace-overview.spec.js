@@ -459,6 +459,198 @@ test.describe("Workspace overview", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("keeps existing coordination notes on summary-only attach", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/chats/main");
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const [sessionModule, state] = await Promise.all([
+				import(`${prefix}js/stores/session-store.js`),
+				import(`${prefix}js/state.js`),
+			]);
+
+			const sessionKey = sessionModule.activeSessionKey.value;
+			const overviewPayload = {
+				workspaceId: "workspace-summary-only",
+				workspaceLabel: "Summary Only Workspace",
+				currentBranch: null,
+				currentExecutionRoute: "local",
+				approvalMode: "smart",
+				coordination: {
+					decision: null,
+					currentPlan: "Keep the existing plan",
+					nextAction: "Resume from the saved next step",
+					routeConstraints: null,
+					durableNotes: "Existing durable note",
+				},
+				memorySummary: null,
+				externalActivities: [],
+				externalActivitySummary: { count: 0, sources: {} },
+				recentSessions: [],
+				machine: {
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					nodeId: null,
+				},
+				linkedProject: {
+					id: "workspace-summary-only",
+					label: "Summary Only Workspace",
+					directory: "/tmp/moltis-summary-only",
+					preferredMachineId: "local",
+					preferredMachine: {
+						id: "local",
+						kind: "local",
+						label: "Local host",
+						executionRoute: "local",
+						route: "local",
+						trustState: "trusted_local",
+						health: "ready",
+						available: true,
+						nodeId: null,
+					},
+				},
+			};
+			const machinesPayload = [
+				{
+					id: "local",
+					kind: "local",
+					label: "Local host",
+					executionRoute: "local",
+					route: "local",
+					trustState: "trusted_local",
+					health: "ready",
+					available: true,
+					platform: "local",
+					nodeId: null,
+					remoteIp: null,
+					hostPinned: null,
+					telemetryStale: null,
+					capabilities: ["system.run"],
+					commands: ["system.run"],
+				},
+			];
+
+			function parseRpcPayload(payload) {
+				try {
+					return JSON.parse(payload);
+				} catch (_error) {
+					return null;
+				}
+			}
+
+			function buildAttachResponse(params) {
+				const activity = {
+					source: params.source,
+					title: params.title,
+					summary: params.summary,
+					link: params.link,
+					attachedAt: Date.now(),
+				};
+				overviewPayload.externalActivities = [activity, ...overviewPayload.externalActivities];
+				overviewPayload.externalActivitySummary.count += 1;
+				overviewPayload.externalActivitySummary.sources[params.source] =
+					(overviewPayload.externalActivitySummary.sources[params.source] || 0) + 1;
+				if ("currentPlan" in params) overviewPayload.coordination.currentPlan = params.currentPlan;
+				if ("nextAction" in params) overviewPayload.coordination.nextAction = params.nextAction;
+				if ("durableNotes" in params) overviewPayload.coordination.durableNotes = params.durableNotes;
+				return {
+					activity,
+					coordination: overviewPayload.coordination,
+					workspaceOverview: overviewPayload,
+				};
+			}
+
+			function rpcResponsePayload(parsed) {
+				if (parsed?.method === "sessions.workspace_overview" && parsed?.params?.key === sessionKey) {
+					return overviewPayload;
+				}
+				if (parsed?.method === "machines.list") {
+					return machinesPayload;
+				}
+				if (parsed?.method === "sessions.external.attach" && parsed?.params?.key === sessionKey) {
+					return buildAttachResponse(parsed.params);
+				}
+				return undefined;
+			}
+
+			if (!window.__workspaceSummaryOnlyOrigSend) {
+				window.__workspaceSummaryOnlyOrigSend = state.ws.send.bind(state.ws);
+			}
+			state.ws.send = (payload) => {
+				const parsed = parseRpcPayload(payload);
+				if (!parsed) return window.__workspaceSummaryOnlyOrigSend(payload);
+				const responsePayload = rpcResponsePayload(parsed);
+				if (responsePayload === undefined) {
+					return window.__workspaceSummaryOnlyOrigSend(payload);
+				}
+				const responder = state.pending[parsed.id];
+				if (responder) {
+					responder({ ok: true, payload: responsePayload });
+					delete state.pending[parsed.id];
+				}
+				return undefined;
+			};
+
+			sessionModule.upsert({
+				key: sessionKey,
+				label: "Summary only attach session",
+				model: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				messageCount: 0,
+				lastSeenMessageCount: 0,
+				projectId: "workspace-summary-only",
+				workspace: "workspace-summary-only",
+				workspaceLabel: "Summary Only Workspace",
+				sandbox_enabled: false,
+				sandbox_image: null,
+				worktree_branch: "",
+				channelBinding: null,
+				activeChannel: false,
+				parentSessionKey: null,
+				forkPoint: null,
+				mcpDisabled: false,
+				preview: "",
+				archived: false,
+				agent_id: "main",
+				agentId: "main",
+				node_id: null,
+				surface: "web",
+				sessionKind: "web",
+				executionRoute: "local",
+				machine: overviewPayload.machine,
+				externalAgentSource: "native",
+				version: 999,
+			});
+			sessionModule.setActive(sessionKey);
+			sessionModule.notify();
+		});
+
+		await openChatMoreModal(page);
+		const chatMoreModal = page.locator("#chatMoreModal");
+		await chatMoreModal.getByRole("button", { name: "Attach external work" }).click();
+		await chatMoreModal.getByLabel("Summary").fill("Attached a summary-only Codex review.");
+		await chatMoreModal.getByRole("button", { name: "Attach", exact: true }).click();
+
+		await expect(chatMoreModal.getByText("Keep the existing plan", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Resume from the saved next step", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Existing durable note", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("Attached a summary-only Codex review.", { exact: true })).toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("ignores stale attach responses after switching sessions", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/chats/main");
@@ -753,9 +945,12 @@ test.describe("Workspace overview", () => {
 		});
 
 		await expect(chatMoreModal.getByText("Workspace: Workspace B", { exact: true })).toBeVisible();
+		await chatMoreModal.getByRole("button", { name: "Attach external work" }).click();
+		await chatMoreModal.getByLabel("Summary").fill("Keep this in-progress note for workspace B");
 		await page.waitForFunction(() => window.__workspaceStaleAttachResolved === true);
 		await expect(chatMoreModal.getByText("Workspace: Workspace B", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Late response from workspace A", { exact: true })).not.toBeVisible();
+		await expect(chatMoreModal.getByLabel("Summary")).toHaveValue("Keep this in-progress note for workspace B");
 		expect(pageErrors).toEqual([]);
 	});
 });

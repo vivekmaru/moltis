@@ -365,24 +365,27 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 
 	function attachRequestPayload(trimmedSummary) {
 		var parsedImportedMessageCount = Number.parseInt(importedMessageCount, 10);
-		return {
+		var payload = {
 			key: sessionKey,
 			source: source,
-			title: title.trim() || null,
 			summary: trimmedSummary,
-			link: link.trim() || null,
-			importedSessionKey: importedSessionKey.trim() || null,
-			importedMessageCount:
-				importedMessageCount.trim() && Number.isFinite(parsedImportedMessageCount) ? parsedImportedMessageCount : null,
-			currentPlan: currentPlan.trim() || null,
-			nextAction: nextAction.trim() || null,
-			durableNotes: durableNotes.trim() || null,
 		};
+		if (title.trim()) payload.title = title.trim();
+		if (link.trim()) payload.link = link.trim();
+		if (importedSessionKey.trim()) payload.importedSessionKey = importedSessionKey.trim();
+		if (importedMessageCount.trim() && Number.isFinite(parsedImportedMessageCount)) {
+			payload.importedMessageCount = parsedImportedMessageCount;
+		}
+		if (currentPlan.trim()) payload.currentPlan = currentPlan.trim();
+		if (nextAction.trim()) payload.nextAction = nextAction.trim();
+		if (durableNotes.trim()) payload.durableNotes = durableNotes.trim();
+		return payload;
 	}
 
 	async function submitAttach(event) {
 		event?.preventDefault?.();
 		if (!sessionKey || saving) return;
+		var attachSessionKey = sessionKey;
 		var trimmedSummary = summary.trim();
 		if (!trimmedSummary) {
 			setError("Summary is required.");
@@ -391,6 +394,7 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		setSaving(true);
 		setError("");
 		var result = await sendRpc("sessions.external.attach", attachRequestPayload(trimmedSummary));
+		if (sessionStore.activeSessionKey.value !== attachSessionKey) return;
 		setSaving(false);
 		if (!result?.ok) {
 			setError(localizedRpcErrorMessage(result?.error));
@@ -398,7 +402,7 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		}
 		resetForm();
 		setShowAttachForm(false);
-		onAttached?.(sessionKey, result.payload);
+		onAttached?.(attachSessionKey, result.payload);
 	}
 
 	return html`
