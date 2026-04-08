@@ -1,5 +1,5 @@
 import { html } from "htm/preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { onEvent } from "../events.js";
 import { localizedRpcErrorMessage, sendRpc } from "../helpers.js";
 import { sessionStore } from "../stores/session-store.js";
@@ -324,8 +324,10 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 	var [durableNotes, setDurableNotes] = useState("");
 	var [saving, setSaving] = useState(false);
 	var [error, setError] = useState("");
+	var requestTokenRef = useRef(0);
 
 	useEffect(() => {
+		requestTokenRef.current += 1;
 		setShowAttachForm(false);
 		setSource("codex");
 		setTitle("");
@@ -406,6 +408,8 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		event?.preventDefault?.();
 		if (!sessionKey || saving) return;
 		var attachSessionKey = sessionKey;
+		var requestToken = requestTokenRef.current + 1;
+		requestTokenRef.current = requestToken;
 		var trimmedSummary = summary.trim();
 		if (!trimmedSummary) {
 			setError("Summary is required.");
@@ -420,7 +424,7 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 			return;
 		}
 		var result = await sendRpc("sessions.external.attach", payload.value);
-		if (sessionStore.activeSessionKey.value !== attachSessionKey) return;
+		if (requestTokenRef.current !== requestToken || sessionStore.activeSessionKey.value !== attachSessionKey) return;
 		setSaving(false);
 		if (!result?.ok) {
 			setError(localizedRpcErrorMessage(result?.error));
