@@ -103,8 +103,19 @@ configuration per client.
 The first external-agent handoff path is explicit and auditable rather than
 deeply embedded in editors.
 
+From the web UI, open the workspace overview and use **Attach external work**
+to record a Codex / Claude Code / Copilot / API handoff against the active
+session. That form writes back into the same durable workspace state the RPCs
+use, and it can also carry:
+
+- imported session identifiers
+- imported message counts
+- current plan / next action coordinator notes
+- durable notes that should survive the handoff
+
 Use:
 
+- the workspace overview attach form for quick manual handoff capture
 - `sessions.external.attach` to record a Codex / Claude Code / Copilot / API
   run summary against a session
 - `sessions.coordination.set` to persist decision/plan/next-action notes
@@ -113,6 +124,11 @@ Use:
 Attached external work is shown separately from the current conversation and
 separately from durable notes so Moltis can act as the coordinator instead of
 pretending all work originated inside one chat window.
+
+That makes the current integration story practical even before deeper editor
+plugins exist: do the hands-on coding in the tool that fits best, then attach
+the important outcome back into Moltis so the next session inherits the right
+context.
 
 ## Good Next Integrations
 
