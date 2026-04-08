@@ -432,7 +432,7 @@ test.describe("Workspace overview", () => {
 		await chatMoreModal.getByLabel("Summary").fill("Captured a working branch plan and a cleanup follow-up.");
 		await chatMoreModal.getByLabel("Link").fill("https://example.com/handoff");
 		await chatMoreModal.getByLabel("Imported session key").fill("session:claude-42");
-		await chatMoreModal.getByLabel("Imported message count").fill("24");
+		await chatMoreModal.getByLabel("Imported message count").fill("1e3");
 		await chatMoreModal.getByLabel("Current plan").fill("Finalize the cleanup list and validate the branch.");
 		await chatMoreModal.getByLabel("Next action").fill("Run the validation pass from the coordinator session.");
 		await chatMoreModal.getByLabel("Durable notes").fill("Claude Code already prepared the branch plan.");
@@ -443,7 +443,7 @@ test.describe("Workspace overview", () => {
 			chatMoreModal.getByText("Captured a working branch plan and a cleanup follow-up.", { exact: true }),
 		).toBeVisible();
 		await expect(chatMoreModal.getByText("Session: session:claude-42", { exact: true })).toBeVisible();
-		await expect(chatMoreModal.getByText("24 msgs", { exact: true })).toBeVisible();
+		await expect(chatMoreModal.getByText("1000 msgs", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Claude Code: 1", { exact: true })).toBeVisible();
 		await expect(chatMoreModal.getByText("Source: Claude Code", { exact: true }).first()).toBeVisible();
 		await expect(

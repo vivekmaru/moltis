@@ -363,23 +363,43 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 			);
 	}
 
+	function validatedImportedMessageCount() {
+		var trimmedValue = importedMessageCount.trim();
+		if (!trimmedValue) return { ok: true, value: null };
+		var numericValue = Number(trimmedValue);
+		if (!(Number.isFinite(numericValue) && Number.isInteger(numericValue)) || numericValue < 0) {
+			return {
+				ok: false,
+				message: "Imported message count must be a whole number.",
+			};
+		}
+		return { ok: true, value: numericValue };
+	}
+
+	function appendOptionalAttachFields(payload, countValidation) {
+		if (title.trim()) payload.title = title.trim();
+		if (link.trim()) payload.link = link.trim();
+		if (importedSessionKey.trim()) payload.importedSessionKey = importedSessionKey.trim();
+		if (countValidation.value != null) {
+			payload.importedMessageCount = countValidation.value;
+		}
+		if (currentPlan.trim()) payload.currentPlan = currentPlan.trim();
+		if (nextAction.trim()) payload.nextAction = nextAction.trim();
+		if (durableNotes.trim()) payload.durableNotes = durableNotes.trim();
+	}
+
 	function attachRequestPayload(trimmedSummary) {
-		var parsedImportedMessageCount = Number.parseInt(importedMessageCount, 10);
+		var countValidation = validatedImportedMessageCount();
+		if (!countValidation.ok) {
+			return countValidation;
+		}
 		var payload = {
 			key: sessionKey,
 			source: source,
 			summary: trimmedSummary,
 		};
-		if (title.trim()) payload.title = title.trim();
-		if (link.trim()) payload.link = link.trim();
-		if (importedSessionKey.trim()) payload.importedSessionKey = importedSessionKey.trim();
-		if (importedMessageCount.trim() && Number.isFinite(parsedImportedMessageCount)) {
-			payload.importedMessageCount = parsedImportedMessageCount;
-		}
-		if (currentPlan.trim()) payload.currentPlan = currentPlan.trim();
-		if (nextAction.trim()) payload.nextAction = nextAction.trim();
-		if (durableNotes.trim()) payload.durableNotes = durableNotes.trim();
-		return payload;
+		appendOptionalAttachFields(payload, countValidation);
+		return { ok: true, value: payload };
 	}
 
 	async function submitAttach(event) {
@@ -393,7 +413,13 @@ function ExternalActivitiesSection({ activities, summaryCounts = {}, sessionKey 
 		}
 		setSaving(true);
 		setError("");
-		var result = await sendRpc("sessions.external.attach", attachRequestPayload(trimmedSummary));
+		var payload = attachRequestPayload(trimmedSummary);
+		if (!payload.ok) {
+			setSaving(false);
+			setError(payload.message);
+			return;
+		}
+		var result = await sendRpc("sessions.external.attach", payload.value);
 		if (sessionStore.activeSessionKey.value !== attachSessionKey) return;
 		setSaving(false);
 		if (!result?.ok) {
